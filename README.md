@@ -1,6 +1,6 @@
 # Gitorrent
 
-P2P Protocol! For Git Repositories! Awesome.
+P2P Protocol! For Git! Awesome.
 
 ### Description
 
