@@ -1,0 +1,1005 @@
+\section{The GitTorrent Protocol}
+\label{sec:protocol}
+
+% Design and specify a distributed transport protocol for git.
+
+This section presents the design of the GitTorrent protocol.  It will
+focus on providing an analysis of the key aspects as well as
+discussing the motivation behind some of the decisions. A protocol
+specification, containing information for developers wishing to
+implement the protocol, is available in Appendix \ref{app:rfc} as a
+separate RFC-like document. The RFC supplements this section and it
+is recommended that the reader is familiar with it before reading this section. It assumes that the reader is
+familiar with low-level details of the git version control system, and
+therefore does not introduce any git concepts itself. The RFC is based
+on the protocol specification given in \cite{9}. 
+
+The protocol is heavily inspired by the BitTorrent protocol, a mature
+file distribution protocol, and fundamental concepts are modeled
+directly on BitTorrent. Basing the design on an existing and well
+tested protocol has made it possible to focus on aspects related
+to git. BitTorrent will be referred to throughout the section as a
+method of introducing important protocol infrastructure.
+Although, no prior knowledge of BitTorrent is a prerequisite for
+reading this section, it is however highly recommended. A small
+introduction that also originates from \cite{9} is given in
+Section \ref{sec:bittorrent}
+
+% Depending on the results of the above examination, several levels of
+% complexity can be chosen for the protocol, ranging from a truly
+% distributed P2P solution to a P2P-based client-protocol using a
+% centralized service for synchronization.
+
+\subsection{Protocol Design Goals}
+
+%\sub section{Basic System Goals}
+
+As explained in Section \ref{sec:repo-sync}, all existing protocols for
+synchronizing repositories are strictly client-server. For sites, hosting
+many and possibly big repositories, this puts a lot of
+demand on resources. The overall goal is therefore to create a
+distributed peer-to-peer oriented protocol that provide scalability and enables
+repositories to be published with minimal resource requirements.
+
+To illustrate some of the motivation behind creating the protocol,
+following are some use-cases that the protocol tries to address:
+
+\begin{description}
+
+\item[Large scale project hosting]
+%
+	Big projects such as the Linux kernel have many developers each
+	of which maintain one or more repositories. All repositories are
+	published through services at the
+	kernel.org site that runs a dedicated git daemon. Some of the
+	repositories listed at \texttt{http://kernel.org/git} are
+	big and many have intersecting objects.
+
+	Such a site could benefit from having a scalable system for
+	distributing changes, especially right after a kernel release
+	where many people are expected to synchronize their
+	repository to get the latest kernel.
+
+\item[Gateway mirroring]
+%
+	Many developers want to use git for developing on projects
+	that do not use git. To accomplish this they can import the
+	history from the version control system in question to git.
+	This import process is not always cheap, since it can require
+	fetching a lot of data from the repository being imported. For
+	sites such as \texttt{http://sourceforge.net/} that host many CVS repositories this puts
+	a lot of strain on their resources and as a result they do not
+	condone this kind of use.
+
+	By creating a version control gateway service that mirrors the
+	CVS repositories as git repositories, only one site would
+	have to import the CVS repositories. Furthermore, this gateway
+	service would not itself require many resources to maintain.
+
+\item[Anonymous publishing]
+%
+	As it stands today, a developer needs to have access to a
+	public server in order to publish a repository. Although HTTP
+	hosting is cheap and a viable solution for most people, this
+	can in some situations be inconvenient. If for example the
+	repository being published only adds a few changes on top of
+	the revision history of another repository, existing protocols
+	require that the whole repository is published. Also, these
+	kind of repositories may only exist for a short while and
+	disappear after their changes have been merged upstream.
+
+	The choice of being able to ``anonymously'' publish
+	repositories can help individual contributers to easily make
+	their changes available to a broader community without
+	requiring many resources.
+
+\end{description}
+
+The use-cases pose some widely different requirements. While the
+hosting sites in the first two cases are expected to have the
+resources to provide a central service, this is not the case for
+anonymous publishing, which is more decentralized. The gateway mirror
+sites can provide many repositories with no relation at all, where the
+big project site may be able to capitalize on repositories being
+related to each other in some way. It can be expected that the first
+two use-cases have more development activity and need to distribute a
+considerable amount of updates to the repository.
+
+To summarize, the protocol needs to be a hybrid that is able to both
+work in a very decentralized manner to allow anonymous publishing, and
+also to allow more centralized services to be deployed. By relying on
+centralized services, it is possible to help to distribute information
+about new updates faster, and thereby make certain assumptions about
+the status oriented meta-data in the system. However, the system
+should be able to adapt to a lot of peers joining the network and
+avoid single point of failures, by making it possible to reduce the
+load on or completely eliminate the need for central services.
+Finally, a method for sharing object stores between different
+repositories published using the protocol can improve the overall
+performance.
+
+Although some repositories may have a lot of activity, it is not the
+goal of the protocol to provide instant real-time access to
+repositories. One reason is that such a requirement can be hard to
+guarantee in a distributed network where some parts may be more
+loosely connected than others. Instead, the goal of the protocol is to
+create the basis for a scalable system, where changes will slowly but surely be
+replicated to all peers.
+
+Another topic is the level of fairness that should be built into the
+protocol. On one hand, it should encourage peers to contribute, but
+should also recognize that building a complex trading system defining
+how peers should exchange data and rate each other is not necessarily
+a requirement for the protocol to be usable. Much can be a
+matter of policy, making the network self-regulating.  Similar to
+BitTorrent, peers can simply use the tit-for-tat strategy when
+exchanging data.  However, it is likely that most users will be open
+source organizations and contributors, a community built around the
+sharing of ideas.  These ``altruistic'' peers may greatly outnumber
+the strictly tit-for-tat oriented peers.
+
+Reducing complexity has been a recurring theme in the key decisions.
+However, while the protocol has been deliberately kept simple, an
+important goal has been to design the core aspects of the protocol to
+be extensible and forward compatible both in terms of new protocol
+additions but also in terms of the dependency on git which is
+constantly being enhanced with new features. That is, the protocol should
+approach needs of the open source community by allowing new optional
+features to be developed and deployed.
+
+
+\subsection{The BitTorrent Protocol} \label{sec:bittorrent}
+ 
+\begin{figure}[!tbp]
+\begin{center}
+\includegraphics[scale=0.6]{figures/bittorrent_1.eps}
+ 
+\caption[BitTorrent overview] {An overview of the different entities in
+the BitTorrent protocol.  First, the client retrieves a metainfo file (1), then the client contacts
+the tracker specified in the metainfo file (2), and the tracker sends a list of
+peers (3), which the client can use to contact the swarm (4).}
+ 
+\label{fig:bittorrent}
+\end{center}
+\end{figure}
+
+BitTorrent is designed to be an alternative to traditional file transfer
+protocols such as TFTP and FTP. It removes the need for large bandwidth
+capacity on a server, by forcing clients to upload pieces of the file
+to each other.
+
+A BitTorrent system consists of three distinct entities: a
+\emph{metainfo file}, a \emph{tracker} and the \emph{peers}.  A peer
+is launched by the user agent acting on behalf of a user. The peer
+must become part of a swarm of peers in order for it to be able to
+carry out the actual download of the file or files. It can become part
+of an already existing swarm by contacting a tracker, which in return
+will send back to the peer a list of IP addresses and port numbers of
+other peers that are already in the swarm. Once connected to the
+swarm, a peer will act both as a TCP server, by accepting incoming
+connections from other peers, and as an initiator of connections, by
+opening a connection to other peers.
+
+A tracker keeps track of the peers that exist in potentially multiple
+distinct swarms. It does so by internally keeping a list of peers that
+are connected to each swarm. A tracker is implemented as a HTTP
+service that responds to GET requests.  Usually, the tracker is
+implemented using a CGI script in a language such as Python or Perl.
+
+The glue that binds a peer to a tracker is the metainfo file.  It
+contains, among other things, the specific URL of the tracker. A peer
+must fetch this file using some offline method and decode its
+contents. The metainfo file is composed, and usually put on a website,
+by the organization that wants to publish the actual files for
+download. Apart from the tracker URL, the metainfo file contains other
+information necessary for peers to download and verify data from other
+peers.
+
+For the purpose of sharing, the data is viewed as a single stream of
+bytes, even though it might consist of multiple files. The metainfo
+file contains the hierarchy as well as filenames that a peer uses to
+reassemble each file. The data stream is now partitioned into smaller
+pieces of equal size, with possible exception of the last piece. For
+each of these pieces the metainfo file contains a 20-byte SHA1 hash
+value. This value is used by each peer to confirm that the data
+received from a peer is in fact the same data that was intended by the
+publisher of the metainfo file. A peer usually does not download an
+entire piece in one exchange, but splits it into an implementation
+defined number of blocks. The peer may download the blocks from
+multiple peers in the swarm. Once a piece is complete, the peer must
+check its integrity and discard the piece if it fails the check.
+
+In order for a swarm to initialize correctly there must be an initial peer
+that can serve all the pieces to other peers. This initial peer is usually
+set up by the publisher of the metainfo file, and is called the initial
+seeder. Any other peer that manages to acquire a complete copy of the
+files to download automatically becomes a seeder.
+
+\subsection{Relation Between BitTorrent and GitTorrent}
+
+Similar to the BitTorrent protocol, the GitTorrent protocol is best
+classified as a peer-to-peer protocol, although it also contains
+highly centralized elements. Compared to the initial version of
+BitTorrent, the GitTorrent protocol is however more decentralized by
+nature. The system is comprised of the same basic three basic entities:
+
+\begin{description}
+
+\item[The metainfo file]
+%
+	Instead of containing file information, it contains information
+	about a git repository available for synchronization, such as
+	branch and tag names and an address of a tracker.
+%         The metainfo
+%         file is described in detail in Section \ref{sec:metainfo}.
+
+\item[The peers]
+%
+	Compared to BitTorrent, peers are able to exchange more
+	state-oriented data, such as addresses on other peers in the
+	network. That is, once connected a peer should be able to keep
+	updated by solely communicating with other peers in the
+	swarm. Remaining is the problem of discovering an
+	initial peer in the network.
+
+\item[The tracker]
+%
+	As in BitTorrent, this discovery can happen using the tracker,
+	which may also provide updates to branches and tags in the
+	repository being tracked.  In GitTorrent the tracker is, as
+	already suggested, to some extent optional, since peers
+	can distribute all relevant information amongst themselves.
+
+\end{description}
+
+Among the major differences to the BitTorrent protocol is that, while
+the BitTorrent is designed for static data distribution, the
+GitTorrent protocol must handle the continuous addition of new data.
+It can, however, capitalize on the append-only semantics of the git
+object store to optimize the data exchange. Also, while GitTorrent,
+similar to BitTorrent, divides peers into separate networks based on
+what data they are interested in, git's content-based model allows
+object stores to be shared between different networks, which can help
+to reduce the overall amount of data that needs to be synchronized.
+
+\subsection{Overall Operation}
+
+% \begin{figure}[!tbp]
+% \begin{center}
+% \includegraphics[scale=0.7]{figures/GTP.eps}
+%  
+% \caption[BitTorrent overview] {An overview of the different entities in
+% BitTorrent.  1. The client retrieves a metainfo file.  2. The client contacts
+% the tracker specified in the metainfo file, 3. The tracker sends a list of
+% peers, 4. The client contacts the swarm.}
+%  
+% \label{fig:gittorrent}
+% \end{center}
+% \end{figure}
+
+The protocol can be divided into a centralized and a decentralized
+part, each of which make use of a distinctive subprotocol. The
+centralized tracker protocol provides peers with a method to discover
+other peers in the system and is also responsible for notifying peers
+about new available updates to the repository being tracked. The
+decentralized peer-wire protocol is primarily used by peers to exchange objects
+from the tracked repository.
+
+% The tracker protocol is discussed in
+% Section \ref{sec:tracker} and the peer-wire protocol is presented in
+% Section \ref{sec:peer-wire}.
+
+To join a network and start downloading a repository, a peer must
+first retrieve a metainfo file. Using the information in the file, it
+will then set up a local repository and start to periodically request
+repository updates and peer addresses from the tracker using the
+tracker protocol. The repository can then be downloaded by connecting
+to other peers in the network and trading objects using the peer-wire
+protocol.
+
+In order to publish a repository using the GitTorrent protocol a
+tracker with access to the repository must first be started. Then a
+metainfo file containing the address of the tracker and providing
+information about the structure of the repository must be created and
+published. Finally, a peer with access to the full repository must be
+set up and made to join the peer network by announcing itself to the
+tracker so other peers can contact it.
+
+\subsection{Security Considerations}
+
+%\sub section{Trusted Entities}
+
+%Any protocol that is intended to be used on a hostile network must
+%carefully consider security related topics. 
+
+%Hybrid between truely distributed and
+
+% ed Entities}
+
+Regardless of what services are being provided, a primary concern in
+any distributed system is trust. Without some measure of trust, the
+system will simply collapse into chaos. This is especially true in a highly
+decentralized system, where there are only few or no authoritative end
+points to which other participating end points can refer and verify
+if basic assumptions of the system are upheld.
+
+By default, the safest approach is to assume that no part of the
+system can be trusted. Consequently, for GitTorrent it is safest to
+assume that no peer can be trusted. However, what about the tracker
+and metainfo file, can they be trusted? A third party organization may
+decide to set up a tracker to serve a git repository, that originates
+from a different organization, which means that they are in no way
+authoritative in the sense that they are the original source, although
+they may be serving the original vanilla repository.
+
+Due to the self-verifying nature of the git objects store, a scenario
+where neither the tracker nor the metainfo file are trusted can
+potentially be supported by using cryptographically signed tags to
+refer to everything in the repository, including branch heads. This
+can even to some extent be done automatically in the origin repository
+by using the hooks mechanism. Although possible, depending on such a
+precautious assumption is too restrictive and can render the protocol
+unusable in many scenarios. The assumption
+will therefore be, that both the tracker and the metainfo file can be
+trusted. Data originating from peers are not to be trusted.
+
+The use of a centralized tracker introduces the possibility of a single
+point of failure. The tracker should therefore never be the only
+source for spreading updates about new branches and tags.
+Consequently, a site should have one or more seeders join the network
+to provide a more resilient infrastructure for distributing such
+updates.
+
+%.. discussion
+
+% must
+% rely on verifying data according to what is defined by the tracker and
+% metainfo file.
+
+
+\subsection{Repository Distribution}
+
+One of the fundamental questions in the design of the protocol is, how
+to best distribute a git repository. As already explained, the git
+repository itself, and the object store in particular, poses few
+restrictions on how it is distributed. So, to answer this question, it
+is necessary to look at the repository and
+identify, which parts are required to be controlled centrally, and
+which parts are best left to the decentralized subsystem. The decision
+must take into account, such aspects as trust and scalability, i.e. it
+must both ensure data integrity but in a way that allows the system to
+harness the power of many peers.
+
+It is important to keep in mind, that the overall system benefits from
+putting as much responsibility as possible on the decentralized part
+of the protocol. Optimally, this suggests leaving data distribution to
+the peer-wire protocol, as long as the data can be verified. Given the
+self-verifying format of git's object store, the complete object store can
+potentially be distributed solely by the peers. Distribution of the
+object store is discussed in Section \ref{sec:obj-store}.
+
+Remaining is how changes to branches and tags are propagated in the
+protocol. Given that both are merely pointers into the object store
+and not considered part of the self-verifying structure of the git
+object store, updates must be controlled by a trusted entity. Updates
+to repository reference is further discussed in Section
+\ref{sec:branch-updates}.
+
+A final observation is that repositories offered via GitTorrent needs
+to be uniquely identifiable. By announcing both to each other and to
+the tracker, what repository they are interested in, the peer and
+tracker programs can participate in multiple networks. Having a
+repository identifier will also make it possible to specify that the
+object store of a repository can be shared with another repository
+being downloaded. Although a peer joins two different networks to
+download the two repositories, it can locally use the alternatives
+mechanism to save disk space and reduce the number of objects to
+download.  BitTorrent derives a unique torrent identifier by using
+SHA1 to digest data from the metainfo file.  The same method can be
+used for GitTorrent to derive a repository identifier. By using an
+implicit identifier derived from data, it is straight forward to
+ensure that the repository is unique across different sites offering
+repositories.  One thing to be aware of is that the identifier should
+be stable to not unnecessarily split repository networks in two, if
+the metainfo file is updated, because new peers will join another
+network than what existing peers have already established. Although
+this problem could be addressed by listing the old repository
+identifier as an alternative repository to share object store with,
+the alternative list can grow very large if the metainfo file is
+updated regularly. The solution will be to only use parts of the
+metainfo file when deriving the repository identifier and require that
+these parts are unique so that the repository identifier becomes
+unique.
+
+\subsection{Distributing the Object Store}
+\label{sec:obj-store}
+
+Git provides a very efficient method for packing object into a dense
+representation that is both useful for reducing resources needed for
+storage and when exchanging objects. It is therefore relevant to
+examine properties with respect to object packing in order
+to judge whether it can be used by GitTorrent. Regardless of how
+objects are transfered over the wire, peers will have to download the
+repository piece by piece. This raises the question of whether it can
+be beneficial to download pieces in a specific order.
+These topics are addressed in the following sections.
+
+% How to best handle the mostly static data in the repository.
+
+\subsubsection{Packing the Object Store}
+
+Before deciding whether packs can be used, this section will try to
+examine how object packing performs. Numbers from the repository of
+five different projects are presented in Appendix \ref{app:stats},
+together with a small description of the characteristics of each
+project. Below important properties are highlighted.
+
+\begin{figure}%[h]
+\begin{center}
+\begin{tabular}[h]{|l|l||c|c|c|c||c|}
+		\hline
+		& & \textbf{Tag} & \textbf{Commit} & \textbf{Tree} & \textbf{Blob} & \textbf{Total} \\
+		\hline
+\textbf{Objects} &   & 36 & 10392 & 40007 & 30518 & 80953 \\
+\hline
+\textbf{Sizes} & Min size  & 468 & 149 & 53 & 24 & 24 \\
+ & Max size  & 1516 & 2338 & 6964 & 68599 & 68599 \\
+ & Average size  & 668 & 292 & 1807 & 6243 & 3121 \\
+\hline
+\textbf{Unpacked total} & Overhead \%   & 83 & 92 & 65 & 32 & 49 \\
+\hline
+\textbf{Packed total} & Overhead \%  & 24 & 1 & 1 & 0 & 0 \\
+\hline
+\textbf{Compression} &  level \% & 0 & 2 & 83 & 89 & 87 \\
+\hline
+		\end{tabular}
+
+\caption{Summary of the repositories. The numbers are averages of the
+repositories in Figure \ref{fig:repo-tig}, \ref{fig:repo-elinks},
+\ref{fig:repo-git}, \ref{fig:repo-cogito}, and \ref{fig:repo-linux} in Appendix \ref{app:stats}
+with no respect to how big the repositories are compared to each other.}
+
+	\label{fig:stats-summary}
+
+\end{center}
+\end{figure}
+
+First, each repository has been both packed and unpacked with respect
+to the different object types to show the compression level and
+disk-space saving. A summary of all the repositories that are part of
+the survey is listed in Figure \ref{fig:stats-summary}. In
+Appendix \ref{app:repo-stats} numbers from each of the different
+repositories are available. The important numbers are in the rows
+containing information about the overhead and compression level.
+
+It can be seen that the blob objects generally control the overall
+packing properties of the repository, especially when it comes to the
+compression level. Generally, there are more tree objects than blob
+objects, which can be due to the fact that both the ELinks and Linux
+kernel tree are structured into many subdirectories containing few
+files.  The Tig repository is exceptional in that it has only few
+files and one tree object per revision, which has the effect of
+reducing the tree object compression level.  At 83\% on average, tree
+objects compress very well and in the general case better than blob
+objects.  As expected, the randomness of the content of both commit
+and tag objects results in a very poor packing performance of only
+2\%.  In terms of disk-space usage between packed and unpacked object
+stores, it is obvious that the overhead of many small object files is
+unavoidable.
+
+Since it can be expected that repositories are divided into many
+pieces when exchanged between peers, it is relevant to also examine how the packing performs when
+varying the number of objects that are compressed in each pack. This
+also includes looking at how the size of the index file varies.  The
+numbers are presented in Appendix \ref{app:pack-stats}, where the the
+columns on per-object sizes are of interest. The per-object sizes can
+be compared with the average object size of each project to get a
+rough idea of the compression level. In some of the tables, rows are
+missing because not all repositories contain enough objects with
+respect to the pack sizes being examined.
+
+The data show that for minimal index files, the packs need to contain
+more than 2500 objects. The 24 bytes per-object for the optimal case
+includes 20-bytes for the object SHA1, and thus cannot be expected to
+become lower. For commit objects, the numbers show that there is
+almost no difference between small and big packs. The same is assumed
+to be the case for tag objects. For tree objects, it becomes very
+clear that in repositories with structured source trees, the tree
+objects compress much better for big packs, whereas a project, such as
+Git, does not save much after pack files reach a size of 250 objects.
+Across all repositories, bigger packs always leads to better
+compression and fewer bytes per object, but only for blob objects.
+
+In conclusion, the heuristic of packing based on object type is very
+good. Neither commit nor tag objects compress very well when packed.
+While both tree and blob objects compress well, tree objects do not
+require bigger packs to provide better compression. The pack index files
+do not require many objects to become optimal. It should also
+be noted from looking at the columns containing numbers about the
+minimum and maximum pack sizes that they can vary a lot compared to
+the average size.
+
+% BitTorrent reference?
+
+\subsubsection{Using Packs}
+
+The previous section clearly shows that packs are a good way to
+express objects in a dense format. Therefore, the GitTorrent protocol
+will use packs when peers exchange objects. There are however
+different ways to use packs, which will be addressed next.
+
+As already mentioned in relation to grafting in Section
+\ref{sec:grafting}, some projects may require that historic archives
+containing only static data are distributed. This is not very
+different from the general case, but still stands clearly out since
+the fact that no data will be appended to the archive, allows it to be
+prepacked into one big pack. The pack can then be served in pieces,
+similar to how BitTorrent works, which reduces bandwidth usage since
+every exchange does not have to be a small and self-contained pack but
+can potentially take advantage of very deep delta chains. This
+suggests to make BitTorrent a subset of GitTorrent, allowing GitTorrent
+to capitalize on BitTorrent's ability to distribute static
+data.
+
+Although such a setup would work, it could also end up putting many
+restrictions on the system. One problem with packing is that it is not
+guaranteed to be stable. Git has allowed a set of objects to be packed
+in multiple ways in order to enable future packing heuristics to
+improve the packing. The only requirement is that pack files are
+self-contained. It is therefore problematic to rely on the existence
+of stable packs, even though some pack files contain only historic and
+static objects and are not likely to be repacked. One solution would
+be to force stable packing across peers, by always defining that a
+specific heuristic must be used when packing. This however introduces
+its own problems, since the GitTorrent implementation will have a
+greater dependency on a particular version of git. Finally,
+introducing a new method for packing objects is questionable when the
+existing packing method perform so well. To simplify the system, no
+stable packing is assumed. Historic repositories will then have to be
+distributed either similar to ordinary repositories--accepting possible
+overhead--or via a separate BitTorrent network.
+
+It is also worth considering how the existing protocols use packs.
+While the HTTP synchronization protocol only serves static packs, the native git
+protocol allows peers to request \emph{custom} packs that are
+generated on the fly. This ensures that the client does not waste
+bandwidth downloading redundant or otherwise unrelated objects.  There
+is however a trade-off, since generating a pack on the fly can be very
+resource demanding. Additionally, as mentioned above, it is
+not possible to make any predictions on the size of the pack being
+served. This underlines that it is necessary to choose between whether
+to favor fairness over optimal packing.
+
+Since GitTorrent is a peer-to-peer protocol, where peers trade
+resources by uploading and downloading, it is deemed far more
+important that peers are able to determine the size of the data they
+have to upload and download. The protocol will therefore be similar to
+the HTTP synchronization protocol, in that it will rely on the distribution of static
+packs. Peers will be able to first exchange lists of pack files they
+make available. A peer may then request the index file of a pack and
+use it to decide, whether it wants to download the actual pack file.
+
+It may not be viable to use packs to transfer all objects. For
+example, there may exist objects that are very big and does not pack
+very well. Therefore, it should be possible to exchange objects
+instead of packs. Also, big packs and object must be distributed in
+separate blocks, similar to how BitTorrent divides file pieces into
+blocks when transferring data over the wire. Peer can then download
+big pack files and objects in a number of blocks. Allowing individual objects
+to be exchanged over the wire also make it possible straightforward for peers to get
+partial repositories, such as only downloading objects related to
+revisions that have been tagged. Consequently, the protocol becomes
+more flexible.
+
+Observations from the previous section has shown that it is good to
+pack objects by type and that bigger packs generally are better. There
+is a trade-off, however, since sending big packs over the wire will
+also increase the chance of failure or that objects from the packs are
+acquired from elsewhere, leading to waste of bandwidth.  As a result,
+pack files should limited in size.  Although, the protocol will not
+impose any restrictions on whether peers repack objects, how objects
+are packed and which packs are served, it will encourage peers to
+reuse downloaded packs by offering them to other peers. This increases
+the chance that a peer can download a pack from multiple neighboring
+peers and thereby get it faster. 
+
+\subsubsection{Fetching Heuristics}
+
+\newcommand{\RevN}[2]{[name=#2#1]\makebox[\RevWidth]{\scriptsize{#2}}}
+\newcommand{\BranchN}[3]{[name=#2#1,linewidth=2pt]\makebox[\RevWidth]{\scriptsize{#2}} & [name=Z,linecolor=white]\makebox[\RevWidth]{\scriptsize{#3}}}
+\newcommand{\RootRevN}[2]{[name=#2#1,linestyle=dotted]\makebox[\RevWidth]{\scriptsize{#2}}}
+
+% fillcolor=lightgray,fillstyle=solid
+
+\newcommand{\RevLineN}[2]{\ncline[linestyle=dotted]{#1}{#2}}
+
+\begin{figure}%:[!hbp]
+\begin{center}
+
+	\begin{psmatrix}[colsep=1,rowsep=0.5,mnode=circle]
+		\RootRevN{1}{A} & \RevN{1}{B} & \RevN{1}{C} & \RevN{1}{D} & \RevN{1}{E} & \RevN{1}{F} & \RevN{1}{G} & \RevN{1}{H} &  \BranchN{1}{I}{Seeding peer 1} \\
+		\RootRevN{2}{A} & \RevN{2}{B} & \RevN{2}{C} &         &         &         & \RevN{2}{G} & \RevN{2}{H} &  \BranchN{2}{I}{Peer 2} \\
+		            &         &         &         &   \RevN{3}{E}    & \RevN{3}{F}  &     & \RevN{3}{H} &  \BranchN{3}{I}{Peer 3}
+		% Node connections
+		\psset{nodesep=1pt}
+		\RevLine{A1}{B1}
+		\RevLine{B1}{C1}
+		\RevLine{C1}{D1}
+		\RevLine{D1}{E1}
+		\RevLine{E1}{F1}
+		\RevLine{F1}{G1}
+		\RevLine{G1}{H1}
+		\RevLine{H1}{I1}
+
+		\RevLine{A2}{B2}
+		\RevLine{B2}{C2}
+		\RevLine{C2}{D2}
+		\RevLine{G2}{H2}
+		\RevLine{H2}{I2}
+
+		\RevLine{E3}{F3}
+		\RevLine{H3}{I3}
+	\end{psmatrix}
+
+	\caption{Peers can have only partially downloaded a repository
+	and can thus have different views of the objects in the
+	repository. This is shown by no peer, except the seeder, having
+	access to all revisions. Consequently, they may not be able to
+	verify some of the revisions that they have downloaded with
+	respect to the complete revision history. For example, Peer 3
+	will not be able to verify that the revisions E and F are 
+	actually ancestors to revision H and I before it downloads
+	the commit object of revision G.}
+
+	\label{fig:peer-revs}
+
+\end{center}
+\end{figure}
+
+The use of pack files do not make any guarantees regarding the order, in
+which peers download objects. As a result, peers might not be able to
+immediate verify certain objects with respect to the object hierarchy,
+because it may not have all objects, and they may not be able to know
+which packs to request from neighboring peers. This issue is
+illustrated in Figure \ref{fig:peer-revs}.  This might not be a
+problem, since peers, similar to the HTTP synchronization protocol, can keep track of
+which objects to look for starting from the commit objects pointed to
+by the branch heads. When they discover that another peer has an object of
+interest by looking in the pack index files they can start requesting.
+By fetching in this way, the peers will be able to verify at each step
+that the downloaded objects that belong in the object hierarchy are
+valid.
+
+One consequence of this fetching order is that the overall pattern in which objects are
+requested might become linear. The back-referencing nature of the
+commit objects means, that peers will start by first requesting the objects related to
+the most recent revisions in a branch and then follow the ancestor graph
+when requesting the next set of objects. This may hurt the overall
+system, since it can result in the oldest revisions becoming
+rare in terms of replication. To prevent this, BitTorrent allows peers
+to randomly fetch pieces of the files being downloaded. Peers will
+then tend to prioritize rare pieces, because it will make them more
+interesting for other peers to trade with. This in turn helps to
+improve the health of the network since the number of rare pieces are reduced.
+
+To encourage peers to replicate rare data in a GitTorrent network,
+they must have access to all commit objects. Having knowledge of
+all commits would enable peers to maintain a bitmap of which revisions
+other peers have and use it to pick what group of revision objects to
+request next. Finally, access to the list of commit objects makes it
+possible for peers to ``cherry pick'' what revisions to download,
+similar to how BitTorrent allows users to prioritize or only download
+certain files in the torrent. For example, a peer could choose to only
+download the tree and blob objects associated with commit objects
+that have tags.
+
+One way to achieve this more random fetching pattern is for GitTorrent
+to encourage that all commit objects be distributed in packs separate
+from tree and blob objects. Since commit object do not pack very well
+and since the object store does not enforce objects to be distributed
+in any particular order, they can easily be downloaded separately from
+the rest of the objects. When peers see a new branch update, they can
+try to first request the commit objects from their neighboring peers.
+The same mechanism that makes BitTorrent peers interesting when having
+rare pieces, will encourage GitTorrent peers to first acquire all
+commit objects and then keep track of rare revisions. The protocol
+will therefore allow peers to mark what kind of objects a pack they
+offer contain. Peers should, however, only regard this information as
+a recommendation.
+
+
+\subsection{Tag and Branch Updating}
+\label{sec:branch-updates}
+
+As already mentioned tag and branch updating is special, since
+repository references are merely pointers into the object store and
+cannot themselves be verified. This suggests to simply distribute
+these updates via the tracker to ensure that new reference updates can
+be trusted. However, to reduce dependency upon the tracker and allow
+the protocol to be more decentralized, peers should be able to
+exchange information about new updates to references.  A simple
+solution is to introduce a special \emph{reference object} that
+contains a list of branches and tags in the repository. The reference
+object can be created and signed at a trusted entity, so that it can
+be shared both via the tracker and the peer wire protocol.  Since all
+peers will have the metainfo file and it is assumed that the metainfo
+file can be trusted, the public key can be placed in the metainfo file
+so it always available. The only draw-back is that if the key for
+signing the reference objects is compromised, peers are required to
+download a new metainfo file to reestablish the trust of data
+exchanged in the network.
+
+% list of keys that can be used if one is compromissed
+
+Git already has an infrastructure for signed data in the form of tag
+objects. By making the reference object simply a git tag object,
+existing tools can be used for creating and verifying reference
+objects. Furthermore, by using the git reference notation as presented
+in Section \ref{sec:branch-tag}, compatibility with existing git tools
+will be ensured. Compared to the option of listing branches in the
+metainfo file, using a reference object will also make it straight
+forward to add new branches to the repository being distributed via
+GitTorrent.
+
+This does not ensure that the new branches and tags are always being
+updated, since a group of peers can potentially choose to stall the
+distribution of new updates. Consequently, it should also be possible
+to optionally distribute updates via the tracker. Updates can to some
+extent still be stalled by launching a denial of service attack on the
+tracker, this can however be countered by allowing multiple trackers
+to be defined in the metainfo file.
+
+Over time reference objects will replace each other, making it
+necessary for peers to be able to figure out which reference object is
+more recent than another. This suggests that they should contain
+information about their relation to previous reference objects.  In git, the
+tag objects point to another object, so new reference objects
+can simply point to the reference object they replace. However, the
+task of inferring the relation between two reference objects is further
+complicated by the fact that a peer may not have all reference
+objects. To solve this situation a simple timestamp in the reference
+object can be used as a heuristic for judging which reference object
+is newer. As long as it is ensured that the same entity signs all
+reference objects, it can be ensured that timestamps always have a
+well-defined ordering over time. In conclusion, when a peer does not have the
+whole succession of reference objects, it must simply refer to the date that
+git places in its tag objects.
+
+In some repositories many tags and branches can exist so it might not
+be viable to distribute references for all tags and branches in a
+single reference object. Furthermore, if there is a lot of activity in
+a repository it can be beneficial to use small reference objects that
+contain only the names of the branches that has changed. It should
+therefore be possible to split updates to branches and tags into
+multiple reference objects. A peer will therefore have to collect
+different reference lists to get the complete list of references. This
+posses the problem of finding out how to cascade reference lists over
+time. To solve this the peer have to use the timestamps of the
+reference objects to maintain a timestamp per entry in each reference
+list.
+
+% Either by solely distributing them through the metainfo file and the
+% tracker or by using a mixed scheme.
+
+Finally, there is the question of what type of updates to allow. For
+example, should it be possible to redistribute a tag? This can become
+relevant, if the original tagger is forced to recreate all tags
+because his private key has been compromised. Another thing is, whether
+non-fast-forwarding updates to branch heads should be supported.  When
+a branch update does not fast-forward several revisions which were
+previously relevant will no longer be required. The peer must
+therefore clean up and cancel any outstanding requests to waste more
+bandwidth. To embrace as many types of repositories as possible, the
+protocol will not pose any restrictions on how branches and tags are
+updated; both non-fast-forwarding branches and tag replacement are
+allowed.
+
+\subsection{Data Exchanging Formats and Transport Protocol}
+
+Widely different requirements and constraints exist regarding the two
+protocols, which are consequently also reflected in the formats used
+for exchanging data over the wire. Because the tracker can be assumed
+to be running on a system with adequate resources and because peers
+only periodically will contact the tracker, a higher level and more
+platform independent data format can be used. Additionally, the
+tracker protocol, as well as the metainfo file, needs to be able to
+represent more complex data structures than what is required on the
+peer wire.
+
+A lot of different options for representing structured data exists,
+such as XML. However, XML and many of the other markup languages in
+use on the Internet are not suitable since they require too many
+resources, even for the metainfo file and the tracker protocol. As a
+result, both will use the bencoding format, also used by BitTorrent.
+The bencoding format, which is fully defined in Appendix
+\ref{app:rfc}, defines two scalar types, integers and strings, and two
+compound types, lists and dictionaries, allowing very complex
+data structures to be represented in a dense format that is easily
+decoded by peers.
+
+% On the other hand, the peer-wire protocol should be
+
+The format used by the peer-wire protocol for exchanging data should
+be optimized to reduce overhead as much as possible, both when it
+comes to transferring and decoding the data. Because the data exchanged
+between peers can be expected to mostly involve smaller bursts of
+messages the peer-wire protocol will encode data using a binary
+format, where each message uses a uniform structure and is dedicated
+to having only one type of payload.
+
+While the desire to reduce overhead and the message based nature of
+the peer-wire protocol would suggest the use of a transport protocol
+such as UDP, it is also desirable to use a transport protocol that
+provides certain guarantees with regard to data sent over the wire.
+Since UDP does not guarantee anything and as a result requires users
+to build their own layer to meet the demands of the protocol, the
+transport protocol used by all protocols in GitTorrent will be TCP.
+This will reduce the complexity of both the peer and tracker and will
+also make the GitTorrent protocol automatically adjust to congested
+networks.
+
+\subsection{The Metainfo File}
+\label{sec:metainfo}
+
+As already mentioned, the primary reason for using a metainfo file is
+to distribute the public key for verifying reference objects and
+provide the peer with a list of tracker addresses. Placing this mostly
+static data in a file, accomplishes several things:
+
+\begin{itemize}
+
+\item
+%
+	First and foremost, it relieves the tracker from having to
+	serve more data than necessary. 
+
+\item
+%
+	By putting the data in a file, it is made protocol independent
+	and can be distributed in any suitable way, such as via FTP or
+	email.
+
+\item
+%
+	There already exist a method for mapping a file extension to a
+	MIME-type and finally to an application capable of handling
+	the file type. Compared to using a dedicated protocol, that
+	might require a plug-in to be installed and loaded, this makes
+	it easier to add support for GitTorrent to web browsers and
+	other user agents that exchange data over the Internet.
+
+\item
+%
+	Last but not least, it provides users with a convenient method
+	of referring to a repository. They can either just bookmark the
+	metainfo file or save it on their local system for later
+	retrieval, since it is self-contained.
+
+\end{itemize}
+
+GitTorrent metainfo files will have \texttt{.gittorrent} as their
+extension, and should be identified by the MIME-type
+\texttt{application/x-gittorrent}. Applications that do not support
+the GitTorrent protocol should provide the user with a dialog to
+either save the file or invoke an external handler.
+
+Parts of the metainfo file will be used for deriving the global
+repository identifier. It is therefore important that the metainfo
+file is structured so that the repository identifier has a good chance
+of being unique. Similar to how BitTorrent uses the list of SHA1
+checksums for ensuring that its info hash is unique, GitTorrent can
+make the public key part of the set of data being hashed to ensure
+that it is at least unique with regard to the trusted entity.  By also
+adding some more repository specific information, such as an owner and
+a description field, to the data set, uniqueness should not be hard to
+ensure for the trusted entity creating the metainfo file.
+
+Although the metainfo file should not contain data that changes over
+time, the protocol will allow an initial reference object to be
+specified. This reference object may be out of date when a peer joins
+the network, however, it will provide it with an initial version of
+repository references so it can start requesting data right away
+without having to first get an updated reference object. This requires
+that it is possible to rebuild the metainfo file without disrupting
+the network. As long as no data used for deriving the repository
+identifier is modified the repository identifier will remain stable
+across different versions of the metainfo file.
+
+Apart from the essential data already mentioned, the metainfo file can
+also be used for distributing more user-oriented data, such as who
+created the metainfo file, the URL for the repository's web interface,
+etc. Since this is in no way essential, the metainfo file will simply
+mimic BitTorrent and have only a few optional fields.
+
+% A final thing to consider is the encoding of strings in the metainfo file.
+% Some of the optional entries may require characters other than ASCII, and
+% the bencoding format does not provide a method for specifying an encoding.
+% BitTorrent has solved this by allowing 
+
+\subsection{The Tracker Protocol}
+\label{sec:tracker}
+
+To keep GitTorrent simple, the tracker protocol will, similar to
+BitTorrent, base itself on HTTP. Consequently, the tracker can be
+reduced to a CGI script taking arguments as a query string and
+returning a bencoded response. This makes it easy to set up and
+maintain a tracker.
+
+Each time a peer sends a request to the tracker it needs to identify
+itself by listing its peer ID, address, and port number.
+Additionally, the peer should specify the repository identifier so the
+tracker knows, which peers and reference objects to put in the
+response. Lastly, the peer should be able to specify whether it is
+interested in receiving peer information and new reference objects in
+the response, since both can be exchanged over the peer-wire protocol.
+
+The most important role of the tracker is to keep track of the peers
+in the swarm. To enable it to know which peers enter and leave the
+network, peers must be able to specify if they are joining or
+leaving the network. Since a peer may not shutdown gracefully, the
+tracker may need to prune its peer list from time to time.
+Furthermore, the tracker should be able to specify how long time
+the peer should wait before making another request. This allows it to
+loosely control the number of requests and make it possible for the
+tracker to scale better. For repositories with little activity and a
+big network, the tracker can use this to further reduce resource
+consumption when there are no updates to provide.
+
+Since the tracker is centralized, it is able to collect statistics on
+the network of peers. The continuing addition of revisions in the
+repositories being tracked makes it hard to defer how many peers are
+seeding the network and how many are downloading because peers will
+switch back and forth between the two states.  Whereas in BitTorrent,
+peers inform the tracker when they complete downloading a torrent,
+such a scheme would not be suitable for GitTorrent when a repository
+experiences a lot of activity.  Consequently, the tracker is never
+immediately informed when a peer completes downloading the whole
+repository. It will only be informed in the next regular request. The
+tracker will inform peers about the number of peers with a complete
+and incomplete repository.
+
+\subsection{The Peer Wire Protocol}
+\label{sec:peer-wire}
+
+Most of the topics related to the peer-wire protocol has already been
+discussed in the previous sections. Similar to the tracker protocol
+the infrastructure in the peer-wire protocol are for the most part
+similar to BitTorrent. However, the more decentralized nature of
+GitTorrent, means that it has more message types. In particular, it
+adds messages for exchanging peer addresses, reference objects, pack lists, and
+pack indexes.
+
+Where BitTorrent uses a index to refer to pieces in the torrent,
+GitTorrent will use a SHA1. This increases the average size of the
+peer-wire messages, which may prove to add considerable overhead in
+terms of the resources required for exchanging state oriented data.
+Consequently, to reduce the overall overhead, peers should take this
+into account when they choose a block size.
+
+To allow future extensions, peers will be able to exchange flags about
+optional features they implement in the handshake. They
+should ignore handshake flags they do not understand and discard
+messages that have a type they do not understand. It is up to the peer
+to disconnect, if it deems that it is wasting too many resources by
+dropping messages.
+
+% An important part of the peer wire protocol is devoted to
+% keeping track of the status of a neighboring peer.
+% The basic idea in the peer wire protocol is to maintain two flags
+
+%         peer ID
+% 
+%         snubbed, 
+%         branches:
+%                 has ID
+%                 wants ID
+% Choke Unchoke
+% 
+% Interested Uninterested
+
+% Apart from the peer maintaining its own main repository with
+% downloaded objects, the peer should also keep track of what the
+% neighboring peer has. The peer can maintain this data by having a
+% repository for each peer it is connected to. This allows a peer to
+% keep the information completely separate across different neighboring
+% peers.

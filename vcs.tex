@@ -1,0 +1,835 @@
+\section{Version Control Systems}
+\label{sec:vcs}
+
+Version control systems (VCS) are an essential part of a variety of
+data oriented applications. The ability to access arbitrary revisions of
+some data and the implicit dependency tracking across sets of data
+allow these applications to backtrack to a specific point in time and
+examine that state. This becomes invaluable when one desires to revert to
+a previous state or examine how a particular part of data has evolved.
+
+% also sometimes called source code management or source configuration
+% management (SCM) systems,
+
+There is no agreed upon terminology across the many different
+VCS. Depending on the backgrounds of their respective creators, they
+have each tried to define the system in their own terms. However, a
+few basic concepts exist across the many different systems.  By
+outlining the basic concepts of version control, it is the intention
+that the reader can apply any previous knowledge about VCS to this
+rather generalized model and that it will provide a gentle
+introduction for readers with no prior knowledge about VCS.
+
+\subsection{Versioning Data}
+
+The primary reasons for using a VCS is the ability to track various
+types of data and to be able to access different versions of it.
+Apart from the content of files, versioning can be applied to other
+types of data, such as mode flags and file and directory names,
+allowing rename tracking and checkouts with the correct permissions.
+Some use-cases may also require other data associated with the VCS to
+be versioned, data which is normally not under version control. This
+can be the case for alternative usage modes for the VCS.  For example,
+a patch queue manager may be implemented, using the existing VCS
+infrastructure--particularly, the backing store--but presenting a view
+of the repository as a set of patches as opposed to a linear history.
+However whereas a VCS is typically built around the concept of history
+being immutable, the patch queue manager wants to be able to reorder
+patches as it sees fit. This might motivate that the history of a
+patch or patch series be recorded in the VCS, something that is not
+implicitly supported by the VCS but is built on top of it. In
+conclusion, there are a lot of different types of data which can be
+versioned, some of which is critical and some may only be under
+version control for convenience.
+
+At a glance, a VCS functions much like a database management system
+(DBMS), and the work flow associated with using a VCS is very
+similar to the transaction-based updating of databases. In a DBMS, all
+the tables and field that need to be updated are changed by executing
+a series of commands, and a finalizing commit is then issued to have
+the changes mirrored in the database. This resembles how a developer
+``locally'' changes one or more files over a series of edits and
+finally asks the VCS to integrate the changes into its current state.
+However, whereas most DBMS only keep a journal of recent changes until
+some persistent on-disk state has been ensured, the VCS will keep
+appending all changes to its journal.
+
+An important point in the above example is the atomicity of the
+operation that updates the VCS with new changes. This ensures that the
+VCS always has a consistent and well-defined view of the development
+history. Guaranteeing atomicity is especially important in
+environments where a repository is shared and several developers can
+simultaneously try to update it. To guard against such race
+conditions, locking of either the full repository or only the files being
+updated is often used. For big repositories with many developers,
+the locking must be as fine-grained as possible, so that lock contention
+is reduced.
+
+% Versioning by snapshots and tracking relation
+% -> versus versioning by changesets?
+% Versioning files versus versioning directories.
+
+In the following, a snapshot oriented approach to data-versioning is
+assumed. Other approaches exist, such as changeset-oriented
+versioning, where changes are expressed in terms of deltas instead of
+a succession of snapshots. One of the benefits of changesets is that
+they more densely express how the data being versioned changes between
+sets of states and they are more similar to how developers use and
+think of a VCS. Since changesets are only deltas, deriving a snapshot
+from a list of changeset may require that several deltas are examined.
+Thus with regard to representation, the snapshot-oriented approach is
+simpler and it is how git versions data.
+
+% No dates
+% 
+% Dates can only be used as a heuristic for commit relations
+% 
+% It's not really a problem. The timestamps don't ``matter''. The only thing
+% git really cares about is the dependency order.
+% 
+% If commit timestamps aren't ordered, some of our programs may look at
+% unnecessarily many commits because the heuristics use the (committer)
+% timestamp as a way to guess which leg of a parenthood chain to take, but
+% that's just a guess.
+
+% Allthough a VCS can be used for keeping
+
+% Another important reason is the desire to consistent / backup
+
+\subsection{Collaboration and Snapshots}
+
+\newlength{\RevWidth}
+\newlength{\BranchWidth}
+\settowidth{\RevWidth}{\scriptsize{\bf A}}
+\settowidth{\BranchWidth}{\scriptsize{\bf 0.2-prerelease}}
+\newcommand{\Rev}[1]{[name=#1]\makebox[\RevWidth]{\scriptsize{#1}}}
+\newcommand{\RevNode}[1]{[name=#1]\makebox[\RevWidth]{\scriptsize{}}}
+\newcommand{\TextNode}[2]{[name=#1,linecolor=white]\makebox[\RevWidth]{\scriptsize{#2}}}
+\newcommand{\Branch}[2]{[name=#1,linewidth=2pt]\makebox[\RevWidth]{\scriptsize{#1}} & [name=Z,linecolor=white]\makebox[\RevWidth]{\scriptsize{#2}}}
+\newcommand{\MergeRev}[1]{[name=#1]\makebox[\RevWidth]{\scriptsize{#1}}}
+\newcommand{\RootRev}[1]{[name=#1,linestyle=dotted]\makebox[\RevWidth]{\scriptsize{#1}}}
+\newcommand{\RevLine}[2]{\ncline{#1}{#2}}
+
+% fillcolor=lightgray,fillstyle=solid
+
+\begin{figure}%:[!hbp]
+\begin{center}
+
+	\begin{psmatrix}[colsep=1,rowsep=0.5,mnode=circle]
+		\RootRev{A} & \Rev{B} & \Rev{C} & \Rev{D} & \Rev{E} & \Branch{F}{0.2-prerelease} \\
+		            &         &         & \Rev{G} & \Rev{H} & \Branch{I}{0.1-release}
+		% Node connections
+		\psset{nodesep=1pt}
+		\RevLine{A}{B}
+		\RevLine{B}{C}
+		\RevLine{C}{D}
+		\RevLine{D}{E}
+		\RevLine{E}{F}
+		\RevLine{C}{G}
+		\RevLine{G}{H}
+		\RevLine{H}{I}
+	\end{psmatrix}
+
+	\caption{Parallel lines of development. The dotted circle is
+	the initial state and branch heads are marked by a thick solid
+	circle.}
+
+	\label{fig:parallel-dev}
+
+\end{center}
+\end{figure}
+
+As the source code being managed using the VCS gradually matures,
+snapshots of the source code will be released. Each of these releases
+must be maintained while the main development line enters the
+prerelease stage in order to prepare the next release. This makes it
+necessary to be able to simultaneously track multiple lines of
+development and exchange bug fixes and other changes between them.
+This common scenario illustrates the importance of both of snapshot
+versioning and support for collaboration. With multiple lines of
+development, developers can work in parallel on different snapshots
+and each feed the changes back to the VCS. For example, one team can
+work on stabilizing the release by fixing bugs, while another team can
+work on adding new features to the line of development where the next
+release is prepared. This scenario is depicted in Figure
+\ref{fig:parallel-dev}.  The VCS considers the 0.1-release snapshot
+and the 0.2-prerelease snapshot to be completely separate in terms of
+development. However, because they share a common parent snapshot,
+namely the snapshot on which the release was originally based, the VCS
+is able to find the changes made to the release snapshot and integrate
+them in the prerelease snapshot without overwriting changes made in
+the prerelease snapshot.
+
+The basic entity in the above is the concept of a snapshot, a specific
+state, which in this context refers to a set of files ordered in some
+directory tree. Snapshot versioning builds on top of this by also
+recording dependencies between snapshots, how a snapshot relates to
+other snapshots, such as which snapshot is the parent of a snapshot.
+By singling out a specific subdirectory or file over a series
+of versioned snapshots, the complete history of one particular module
+of interest can be viewed and changes can be attributed to the
+appropriate developers. This is important for the review process when
+collaborating, since it allows a developer to query who added a file,
+implemented a feature, or introduced a bug.
+
+In terms of collaboration, another important aspect is the
+distribution of snapshots, and the seamless integration of changes
+between different source trees. A VCS makes it trivial to update a
+source tree to the most recent version, taking into consideration any
+local changes. This distribution aspect is not only useful for
+developers, but also to beta users who help out testing unreleased
+features.
+
+% For a decentralized VCS the distribution aspect becomes even
+% more important, since development can happen in completely different
+% trees and synchronization is the only method of integrating changes
+% across them.
+
+\subsection{Centralized versus Decentralized Model}
+
+% What limitation / constraints does decentralization introduce?
+% 
+%  - Security: Hash-functions and security.
+% 
+%  - All or nothing: scalable synchronization of repositories.
+
+Historically, the world of version control has been dominated by
+centralized systems, such as CVS, where clients connect to an
+authoritative server providing access to a single shared data
+repository. The centralized model, as implemented by existing systems,
+has encouraged development to happen in a linear fashion instead of in
+parallel. The primary reason is that branching has been an expensive
+operation, which has limited its usage to only big feature branches.
+Being limited to mostly linear development puts certain restrictions
+on how collaboration can happen and is one of the reasons the
+centralized model works best in an environment where developers are
+working close together and are able to coordinate major changes. 
+
+Having an authoritative end point simplifies certain parts of the
+system, such as time stamping, and ensures that every part of the
+system shares the same view of the development history. The latter is
+important when it comes to ordering changes and maintaining version
+numbers on revisions or files, and is one of the reasons why there cannot be any stable version numbers in a
+decentralized\footnote{\emph{Decentralized} is used in the following
+instead of \emph{distributed} to prevent confusion with the
+distribution aspect of VCS.} VCS since there simply is no way to
+assign meaningful version numbers across several logically distinct
+end points without them having to continuously negotiate with all other
+end points. Instead many decentralized VCS uses a revision ID to
+identify snapshots.
+
+\begin{figure}%[!hbp]
+\begin{center}
+	\begin{psmatrix}[colsep=1,rowsep=1,mnode=circle]
+		             &             &             & \RevNode{A}  &	       &  		 &   & &  \TextNode{I}{Linus's kernel repository} \\
+		             & \RevNode{B} &             &  \RevNode{C} &              & \RevNode{D}     &   & &  \TextNode{J}{Subsystem maintainer repositories} \\
+	        \RevNode{E}  & \RevNode{S}  & \RevNode{F} & \RevNode{T} & \RevNode{G}  &  \RevNode{U}    &  \RevNode{H}  & & \TextNode{K}{Other developers and testers} 
+		% Node connections
+		\psset{nodesep=1pt}
+		\RevLine{A}{B}
+		\RevLine{A}{C}
+		\RevLine{A}{D}
+		\RevLine{A}{G}
+		\RevLine{B}{E}
+		\RevLine{B}{F}
+		\RevLine{C}{F}
+
+		\RevLine{D}{H}
+		\RevLine{D}{U}
+		\RevLine{C}{G}
+		\RevLine{C}{T}
+		\RevLine{B}{S}
+	\end{psmatrix}
+
+	\caption{A simplified illustration of the hierarchic structure
+	of repositories for the Linux kernel project. Linus primarily
+	integrates changes from the repositories of the subsystem
+	maintainers, which themselves have changes contributed to them
+	by other developers. This hierarchy ensures that the project
+	can scale to many participating developers, because changes
+	consequently go through a series of developers so that no
+	one developer is responsible for integrating everything.}
+
+	\label{fig:hierarchic-dev}
+
+\end{center}
+\end{figure}
+
+While there may not be any authoritative end point per se in a
+decentralized VCS, end points or repositories may be ordered in some
+hierarchical way. For example, one repository can be an authoritative
+upstream from where all other repositories fetch changes. Such an
+elaborate structure has evolved around the Linux kernel tree, where
+Linus Torvalds maintains an authoritative repository on which other
+developers base their work. This arrangement, illustrated in Figure
+\ref{fig:hierarchic-dev}, is, however, only controlled by policy
+practiced by developers, it is not controlled down in the VCS.
+
+The lack of an implicit authoritative end point consequently introduces the
+requirement that the development history be replicated on all end
+points. Being able to locally access and modify the complete replica
+of the development history allows development to happen in a more
+disconnected fashion than is supported by a centralized VCS. A company
+can fork\footnote{Start a project from an existing code base.} an
+external code base and internally work on a new feature without
+being required to integrate changes back until they are ready and still be
+able to integrate changes from the original end point if required.
+This flexibility means that a decentralized VCS supports a wider range
+of development flows, including the one supplied by centralized VCS,
+since the centralized model is merely a special case of
+the decentralized model.
+
+Compared to the centralized model, the decentralized model raises a
+lot of issues. The lack of global time means that timestamps can only
+be used as heuristics of  when something occurred.  The same may also
+apply to author attribution if there is no way to verify the identity
+of a developer. Another issue is with name spaces across different
+repositories where clashes can occur unless a naming policy is
+implemented. As a last example, changes must to some extent be ordered
+in a well-defined way and globally identifiable across every
+replication so that a consistent view of the development history
+prevails. Each of these issues must be addressed, often requiring a
+compromise between conflicting goals.
+
+Since git uses a decentralized model, the rest of the walk-through will be focused
+on decentralized version control systems.
+
+\subsection{The Repository}
+
+The most important concept of version control is the notion of the
+\emph{repository}\footnote{Also sometimes referred to as an
+\emph{archive}.}.  It is in the repository that the VCS stores the
+state information about the files and content it is tracking. Apart
+from containing all the different versions of the content, the
+repository is also used for storing various meta-data, such as which
+files are currently being tracked.
+
+% Update semantics
+%To increase data integrity
+As can be expected, much of the updating of a repository happens in an
+append-only fashion. That is, every state that enters the repository
+immediately becomes read-only, since keeping every previous state
+around is what allows the VCS to backtrack. Only a few parts
+of the repository are not version controlled in this respect, namely
+the parts responsible of keeping track of which version is the most
+recent; they will continuously be modified.
+
+In a decentralized VCS, the repository is usually assumed to be
+self-contained and will be replicated at each end
+node. However, a repository may hold several different lines of
+development, and in some circumstances, the replication may only be
+partial, depending on what part of the repository the user doing
+the replication is interested in. Partial replication, where only a
+subset of a remote repository's available lines of development is
+replicated, is perfectly well-defined, and the end result itself will be
+a self-contained repository.
+
+% the result is -> it leads to
+
+% Theis stems from the fact that a repository may hold several different
+% lines of development.
+
+\begin{comment}
+
+\subsection{Storage Model}
+
+Two Different Approaches to Versioning
+
+To give an idea of how a VCS works, two different models or views will first
+be investigated:
+
+In the following two different views of how a VCS operates will be
+investigated:
+
+\begin{description}
+
+\item[Database]
+%
+	The VCS is a database which is used to \emph{track content}.
+	It is data-oriented in that you can have different
+	blobs of data each with a unique ID. which may and may not be related.
+
+\item[Virtual file system]
+%
+	A VCS can be thought of as providing a virtual file system layer.
+	
+	Snapshots of a directory tree are stored, which enables previous
+	versions of files and directories to be examined and accessed. Apart
+	from being used as a mean to backup and distribute snapshots, this
+	also allows one to maintain 
+
+	It is a very file-oriented approach in that the interface provided by the VCS enables
+	files to be added, removed, and moved around in the directory tree.  where the VCS provides a
+	virtual file system.  It is possible to add and remove files.
+	Move them between different directories.
+
+	There are two views %
+
+Views: a virtual file system, a database
+
+\end{description}
+
+\end{comment}
+
+\subsection{Branches and Tags}
+
+\begin{figure}%[!hbp]
+\begin{center}
+
+	\begin{psmatrix}[colsep=1,rowsep=0.5,mnode=circle]
+		            &         &         & \Rev{L} & \Branch{M}{Feature branch} \\
+		\RootRev{A} & \Rev{B} & \Rev{C} & \Rev{D} & \Rev{E} & \MergeRev{F}  & \Branch{G}{Trunk} \\
+		            & \Rev{H} & \Rev{I} & \Rev{J} & \Branch{K}{0.1-release}
+		% Node connections
+		\psset{nodesep=1pt}
+		\RevLine{A}{B}
+		\RevLine{B}{C}
+		\RevLine{C}{D}
+		\RevLine{D}{E}
+		\RevLine{E}{F}
+		\RevLine{F}{G}
+		\RevLine{C}{L}
+		\RevLine{L}{M}
+		\RevLine{M}{F}
+		\RevLine{A}{H}
+		\RevLine{H}{I}
+		\RevLine{I}{J}
+		\RevLine{J}{K}
+		\RevLine{I}{J}
+	\end{psmatrix}
+
+	\caption{Parallel lines of development in different branches.
+	The dotted circle is the initial state and branch heads are
+	marked by a thick solid circle. The trunk and release branch
+	is completely separate.}
+
+	\label{fig:branches}
+
+\end{center}
+\end{figure}
+
+Different lines of development are also known as \emph{branches}.
+Each branch has a \emph{branch head} that refers to the most recent
+snapshot in the branch. The branch head of the main development branch
+is usually referred to as the \emph{trunk}. In the following, branch
+and branch head will be used interchangeably.
+
+Branching is mostly used when releasing or preparing a release of a
+stable version. This enables developers to ``freeze'' development in
+the stable version while still being able to apply fixes to the stable
+branch and continue developing in the trunk. Branching can also be
+used in topic branches to group changes together, and
+to keep experimental feature development from interfering with other
+changes. This is illustrated in Figure \ref{fig:branches}.
+
+Although different branches are somewhat separate entities, it is
+possible to synchronize changes between them. This is especially
+useful when a fix has been applied in a release branch and it should
+also propagate to the trunk. The methods used are ``cherry
+picking,'' where only a subset of the changes in one branch are
+applied, and merging, described in Section \ref{sec:merging}, where all
+changes are applied.
+
+Whereas a branch is something in flux, a \emph{tag} is a static reference to
+a specific point of development; a method of bookmarking important
+milestones in the project. Tags are usually created in the event of a
+release, to specifically record the state of the content being
+tracked, so it is possible to easily refer to that state, e.g. when
+creating an archive for distribution. In some VCS, tags can be signed
+with a cryptographic key in order to introduce a certain level of
+trust that it is this and only this version that should be considered
+valid. The ability to verify and trust tags is especially important in
+a decentralized VCS, where development can happen across a series of
+both trusted and untrusted repositories.
+
+For both branches and tags, private copies local to the repository and
+public copies exported or shared with a remote repository can exist.
+Consequently, it is important to be aware of possible name space
+collisions across different repositories. In a hierarchical relation
+between two end points, where one repository can be regarded as the
+\emph{origin} or \emph{upstream}, the downstream repository should
+follow the naming convention dictated by its upstream. However, in
+systems where there is no hierarchy, the need can arise for the various
+contributors to agree on and impose a naming policy to avoid collisions.
+
+\subsection{Working Trees and Working Bases}
+
+As noted, a repository may contain many different snapshots of the content being
+tracked by the VCS. Since it is not possible to work directly on the
+different repository states, a repository is usually accompanied by a
+\emph{working tree}\footnote{Also sometimes known as a \emph{working
+copy}.}, which is a mutable copy of the content of a snapshot. In other words, the working tree
+is a \emph{check out} of a specific snapshot contained in the repository.
+Although it may be any snapshot, a working tree is commonly a check out
+of a branch head, since the most recent version of the branch is
+usually the most interesting one.  However, in the act of bug hunting for example,
+the working tree can be any recorded state.
+
+The basic development work flow includes checking out a specific branch
+head and making changes to one or more files. Apart from content
+changes, modifications of the working tree can also include file mode
+changes, for example, making a file executable.  In this process,
+it is useful to be able to see the difference between the current
+working tree and the initial checkout, sometimes called the
+\emph{working base}. Changes that should not be kept can be reverted
+using the working base, by simply replacing parts of the working tree
+with those in the working base.
+
+The existence of a working tree is not a requirement unless access to
+files from repository snapshots is necessary. In fact, public
+accessible repositories solely used for distribution purposes are
+usually \emph{bare} in the sense that they do not have any working
+tree attached. There is simply no point in having a working tree for a
+repository only used for synchronizing updates.
+
+\subsection{Commits and Revisions}
+
+% Atomic commits?
+
+When changes to the working tree have been tested and verified to be
+correct, they should be \emph{checked into} the repository, or more
+precisely, the modified working tree should be recorded as the new state. This
+process is called \emph{committing} and will result in a new
+\emph{revision} being created from the current working tree. In this
+way, there will exist a revision for each state recorded in the
+repository and each revision will have a unique ID that can be used
+for addressing a specific state.
+
+Apart from simply recording content changes, the commit will also hold
+information such as the date of the change and commit and the author and
+the committer of the change. Usually, it will also be accompanied by a
+log message which can be used for describing the change, e.g. justify
+why the change is needed, and for bug fixes, what previous revision
+the commit amends.
+
+Finally, the commit operation is also responsible for updating the
+head of the branch that is currently checked out, so that it points to
+the new revision ID. To ensure atomic commits, this must be done using
+locking and only once it has been ensured that the revision snapshot
+has been written onto the backing store.
+
+\subsection{Merging}
+\label{sec:merging}
+
+\begin{figure}%[!hbp]
+\begin{center}
+
+	\begin{psmatrix}[colsep=1,rowsep=0.5,mnode=circle]
+		           && &         & \RootRev{P}   & \Rev{Q} & \Branch{R}{Feature branch} \\
+		\RootRev{A} & \Rev{B} & \Rev{C} & \Rev{D} & \Rev{E} & \Rev{F}  & \Rev{G}  & \Branch{H}{Trunk} \\
+		            &         & \Rev{I} & \Rev{J} & \Rev{K} & \Rev{L} & \Branch{M}{0.1-release} \\
+		            &         &         &         & \Rev{N} & \Branch{O}{Bug fix branch}
+		% Node connections
+		\psset{nodesep=1pt}
+		\RevLine{A}{B}
+		\RevLine{B}{C}
+		\RevLine{C}{D}
+		\RevLine{D}{E}
+		\RevLine{E}{F}
+		\RevLine{F}{G}
+		\RevLine{G}{H}
+		\RevLine{K}{F}
+
+		\RevLine{P}{Q}
+		\RevLine{Q}{R}
+		\RevLine{R}{H}
+
+		\RevLine{B}{I}
+		\RevLine{I}{J}
+		\RevLine{J}{K}
+		\RevLine{K}{L}
+		\RevLine{L}{M}
+		\RevLine{J}{N}
+		\RevLine{N}{O}
+		\RevLine{O}{M}
+		\RevLine{M}{H}
+	\end{psmatrix}
+
+	\caption{A complex revision graph with several merge
+	revisions. For the merge in revision M, there is only one
+	merge base, namely revision J. The merge in revision H merges
+	two different branches and consequently has to find a merge
+	bases for both revisions being merged with revision G.  The
+	branch with revision G and the branch with revision M
+	intersect at two points: revision B, just before the initial
+	divergence; and later, revision K, where the release branch
+	was merged into the trunk.	Finally, no merge base exists
+	between revision G and revision R when they are merged
+	together in revision H.}
+
+	\label{fig:merge-base}
+
+\end{center}
+\end{figure}
+
+Where branching enables a line of development to be split into several
+different and completely separate entities, \emph{merging} provides a
+way to join one or more branches so the resulting branch will contain
+all the content changes made across the branches being merged. At the
+lower level, merging is actually performed on revisions, so the result
+of a merge is in some ways similar to the commit operation mentioned
+above in that a new revision will be created; however, the difference is
+that a merge revision will have two or more parent revisions.
+
+Since each branch of the set that is being joined together can potentially have renamed,
+moved, or modified the same content, merging can be a very complex
+operation, where several revisions must be examined, and where
+human-intervention may be required to resolve conflicting content
+changes. Although several branches can be merged in one
+batch\footnote{A so-called ``octopus'' merge.}, the branches are
+usually merged one at a time, reducing the problem to just merging two
+revisions.
+
+% Merging is always local.
+While merging can be used to join any two branches regardless of the
+origin of each--remote repository or the local one--merging must
+always happen locally with the entire ancestry graph of revisions
+being available of each branch being merged. Therefore, to merge a remote
+branch, it must first be fetched into the local repository before the
+merging can begin.  Again, this reduces the problem to just merging
+two local revisions.
+
+
+When merging two revisions, the first step is to find a \emph{merge
+base}, which is a ancestor revision shared by the two branches
+being merged. If development of some feature has happened in a
+separate branch which was branched off from trunk, the merge base when
+merging this feature branch into the trunk will simply be the branch
+point of the feature branch. However, in some circumstances finding
+the merge base can be more difficult. If, for example, the branches
+being merged are themselves ``derivatives'' of other branches, there
+might be multiple merge bases from which to choose, and the best merge base
+might only exist a long way back in the history. Also note that in
+some circumstances, no merge base may even exist. This can happen if
+two branches that are completely unrelated, in that they do not
+originate from the same code base and do not share any history, are
+merged. A few examples are depicted in Figure \ref{fig:merge-base}.
+
+Comparing against the merge base, the directory trees of the two
+revisions are examined in order to find out what has been changed in
+either revision. If a file has been modified in one revision but not
+in the other, the modified version is accepted into the new merged
+revision.  If, however, a file has been modified by both revisions, a
+file-level merge needs to happen. As long as different parts of the
+file were modified this will succeed, but if some of the changes in
+the two revisions intersect, a conflict will be generated.
+
+\begin{figure}%[!hbp]
+\begin{center}
+
+	\begin{psmatrix}[colsep=1,rowsep=0.5,mnode=circle]
+		\RootRev{A} & \Rev{B} & \Rev{C} & \Branch{D}{Trunk} \\
+		            &         &         &         &  \Rev{E} & \Rev{F} & \Branch{G}{Feature branch}
+		% Node connections
+		\psset{nodesep=1pt}
+		\RevLine{A}{B}
+		\RevLine{B}{C}
+		\RevLine{C}{D}
+		\RevLine{D}{E}
+		\RevLine{E}{F}
+		\RevLine{F}{G}
+	\end{psmatrix}
+
+	\caption{The changes in the trunk are a subset of the changes
+	in the feature branch, so it fast-forwards when merging with
+	the feature branch.}
+
+	\label{fig:fast-forward}
+
+\end{center}
+\end{figure}
+
+% When <current> is a descendant of <merged>, or <current> is an
+% -ancestor of <merged>, no new commit is created and the <message>
+% -is ignored.  The former is informally called ``already up to
+% -date'', and the latter is often called ``fast forward''.
+
+When integrating changes, the trivial case is when changes in a branch
+are a subset of the changes in the branch being merged. In terms of
+merge bases, this case is identified by the merge base of the two
+branches being the head of the branch being updated. Merging will
+reduce to simply \emph{fast-forwarding} this branch so it ends up
+being identical to the branch being merged from. Figure
+\ref{fig:fast-forward} shows an example where a feature branch is
+being used for experimental development but is based on the trunk.  If
+the feature branch is merged into the trunk it will simply
+fast-forward the trunk.
+
+An important feature when merging is rename tracking enabling a change
+made to a file in one revision to appear in the merged revision
+even if the other revision renamed the file. Rename tracking, however,
+also adds several corner cases, e.g. a file could have been renamed in both
+revisions or, in a more obscure example, could have been renamed such that a
+path that pointed to a file in the merge base now points to a
+directory. Although these corner-cases may not be very common, a robust VCS must
+still detect and handle them.
+
+Before a merge with conflicting changes can be completed, all
+conflicts need to be \emph{resolved}. The working tree is often used
+as a staging area for this, where the VCS can add conflict markers to
+the files with conflicts so they can easily be edited in order to
+resolve the conflict.
+
+% While most merges can be performed automatically without problems, the
+% possibility of a merge conflict is the main cause of the merge
+% operation being one of the only operations that requires human
+% supervision.
+
+\subsection{Pushing and Pulling Changes between Repositories}
+
+\begin{figure}%[!hbp]
+\begin{center}
+
+	\newlength{\RepoWidth}
+	\settowidth{\RepoWidth}{\scriptsize{\bf Master repository}}
+	\newcommand{\Repo}[1]{[name=#1]\psframebox[cornersize=absolute,linearc=3pt]{\makebox[\RepoWidth]{\scriptsize{\bf Repository #1}}}}
+	\newcommand{\MRepo}[1]{[name=#1]\psframebox[cornersize=absolute,linearc=3pt]{\makebox[\RepoWidth]{\scriptsize{\bf Master repository}}}}
+	\newcommand{\RepoLine}[3]{\ncline{#1}{#2}\naput{\scriptsize{\emph{#3}}}}
+
+	\begin{psmatrix}[colsep=2,rowsep=2,mnode=r]
+		         & \Repo{A} \\
+		\Repo{B} & \MRepo{E} & \Repo{C} \\
+		         & \Repo{D}
+		% Node connections
+		\psset{nodesep=5pt,arrows=->}
+		\RepoLine{A}{B}{}
+		\RepoLine{B}{A}{RW}
+		\RepoLine{B}{E}{RW}
+		\RepoLine{E}{C}{RO}
+		\RepoLine{B}{D}{RO}
+		\RepoLine{E}{D}{RO}
+		\RepoLine{E}{A}{RO}
+	\end{psmatrix}
+
+	\caption{Changes can be pulled and pushed asynchronously
+	between repositories. They may propagate through both
+	read-only (RO) repositories and writable (RW) repositories,
+	that both allow pulling and pushing changes.}
+
+	\label{fig:pull-push}
+
+\end{center}
+\end{figure}
+
+While repositories may be synchronized in a synchronous manner, e.g.
+if one is maintained as an exact mirror of the other, it is common to
+distinguish between \emph{pushing} local changes to a remote
+repository and \emph{pulling} changes from a remote repository into a
+local one. This separation has the property of making the pull
+operation completely read-only with respect to the repository being
+synchronized from, a very common scenario, since a VCS is also used for
+distributing changes, and often lots of people will only be
+``consumers'' of updates. As already mentioned, all repositories in a
+decentralized VCS are a self-contained replica. Changes can therefore
+be synchronized in an asynchronous way and can propagate to a
+repository through a variety of paths, as shown in Figure
+\ref{fig:pull-push}.
+
+% The separation also underlines that often
+% changes trickle only in one direction, the asynchronous workflow where
+% you continously rebase your local work on changes pulled from the
+% remote repository until the changes can be integrated.
+
+Since an existing repository is required for pushing and pulling,
+the initial pull from a repository is therefore
+special and often done in conjunction with initializing an empty local
+repository to pull changes into. This initial replication process is
+referred to as \emph{cloning}, since it will result in an
+identical repository being created, and may involve downloading a
+considerable amount of data. Cloning will also take care of mapping
+remote branches to local branches which are later used when
+synchronizing changes with the remote repository.  Apart from setting
+up the repository, it also includes checking out a working tree. After
+cloning, the new repository may itself be cloned, which will result in
+yet another copy of the repository.
+
+\begin{figure}%[!hbp]
+\begin{center}
+
+	\begin{psmatrix}[colsep=1,rowsep=0.5,mnode=circle]
+		            &         &         &  \Rev{D} & \Rev{E} & \Rev{F}  & \Branch{G}{Local branch} \\
+		\RootRev{A} & \Rev{B} & \Rev{C} \\
+		            &         &         &  \Rev{I} & \Rev{J} & \Branch{K}{Remote branch}
+		% Node connections
+		\psset{nodesep=1pt}
+		\RevLine{A}{B}
+		\RevLine{B}{C}
+		\RevLine{C}{D}
+
+		\RevLine{D}{E}
+		\RevLine{E}{F}
+		\RevLine{F}{G}
+
+		\RevLine{C}{I}
+		\RevLine{I}{J}
+		\RevLine{J}{K}
+	\end{psmatrix}
+
+	\begin{psmatrix}[colsep=1,rowsep=0.5,mnode=circle]
+		            &         &         &  \Rev{D} & \Rev{E} & \Rev{F}  & \Rev{G}  &  \Branch{H}{Local branch} \\
+		\RootRev{A} & \Rev{B} & \Rev{C} \\
+		            &         &         &  \Rev{I} & \Rev{J} & \Branch{K}{Remote branch}
+		% Node connections
+		\psset{nodesep=1pt}
+		\RevLine{A}{B}
+		\RevLine{B}{C}
+		\RevLine{C}{D}
+
+		\RevLine{D}{E}
+		\RevLine{E}{F}
+		\RevLine{F}{G}
+		\RevLine{G}{H}
+
+		\RevLine{C}{I}
+		\RevLine{I}{J}
+		\RevLine{J}{K}
+
+		\RevLine{K}{H}
+	\end{psmatrix}
+
+
+	\caption{A pull of the remote branch will lead to a merge
+	because changes in the remote branch does not fast-forward on
+	top of the local branch since it contains its own changes.}
+
+	\label{fig:pull-merge}
+
+\end{center}
+\end{figure}
+
+An important consideration when pulling or pushing is how to integrate
+the changes being synchronized into the repository being updated. The
+problem arises because the two repositories may each have diverged since
+the last synchronization and it may be necessary to merge in order to
+``realign'' changes between the two repositories. This is illustrated
+in Figure \ref{fig:pull-merge}. The goal is to ensure that no changes
+are lost unintentionally, since there may be scenarios where a
+synchronization should overwrite and abandon changes in the repository
+being updated. As with merges, fast-forwards are preferable since they
+follow the ``append-only'' approach which guarantees that no data is
+discarded. For read-only tracking of a remote branch, which is by far
+the most common case, each pull will always simply fast-forward the
+local branch.
+
+% and is therefore safe in
+% that this sort of integration will not result in changes being lost.
+% The common case for As with merges, fast-forwards
+% follow the preferred
+
+% In a context where the repository being pushed to is shared among
+% several developers, the shared repository can diverge between
+% synchronizations, so that a  push does no longer fast-forward the
+% remote branch. Fast-forward so that the local repository no longer
+% reflects what isdeveloper pushing
+
+While the pull operation can be resolved locally by a merge, the same
+is not true for the push operation. It is the same problem; however,
+when pushing to remote repositories, it is not possible to perform
+various operations since the remote repository might be a bare one
+without a working tree, merging is impractical. For this reason,
+pushing is usually required to always fast-forward, since this
+guarantees that the operation will always succeed without conflicts.
+So in order to push to a remote branch which has diverged from the
+local version of the branch, it is necessary to first pull the
+changes, perform the merging locally, and finally push the resulting branch
+revision.

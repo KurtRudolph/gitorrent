@@ -1,0 +1,935 @@
+\section{The Git Version Control System}
+\label{sec:git}
+%Global Information Tracking with Git}
+%Tracking Content with git}
+
+% ... originated
+Git originated in the aftermath of BitKeeper, a proprietary
+decentralized VCS then used by many Linux kernel developers, no longer
+being available free of charge. When kernel developers, led by Linus
+Torvalds, first started to use BitKeeper, it created a lot of
+controversy over fears of data lock-in. However, BitKeeper showed that
+a decentralized VCS could help Linus and the kernel subsystem
+maintainers to accommodate the ever growing development activity of
+the Linux kernel project. So it was clear that there was no going back
+to simply managing patches; a new VCS would have to be found. After
+scouring existing open source version control systems, Linus concluded
+that none would scale to the task of replacing BitKeeper as the main
+VCS for the Linux kernel, so he set out to create a new VCS which
+specifically addressed the requirements of the Linux kernel
+development process.
+
+Among the requirements the new VCS would have to meet was the desire
+to speed up handling of large directory trees, since the Linux kernel
+project literally consists of thousands of files. Furthermore, the
+rapid pace at which the Linux kernel project advances meant that the
+VCS would have to efficiently handle deeply nested revision graphs.
+Lastly, as already mentioned, a requirement which grew from the
+experience with BitKeeper was that a decentralized VCS was the only
+way to go; the highly distributed nature of the Linux kernel
+development process would simply not fit into a centralized model.
+
+% 00:54 < pasky> fonseca: really, git is at core just a cleaned up and less paranoid monotone ;)
+
+The result was the git version control system, which since its
+inception in April 2005, has grown at an unimaginable rate to become a
+feature-rich set of tools built around a very simple core. Compared to
+other version control systems, git has shed many firmly established
+practices, which has led to git having
+several unique characteristics, some of which has excited a bit of
+controversy. As an example, git does not have explicit file rename
+recording; instead rename tracking is a feature which must be enabled,
+and is done implicitly by comparing similarity between files touched
+by a given revision.
+
+The remainder of this section will introduce git by investigating more
+of the unique characteristics, along with how some of the requirements
+listed above are addressed. It will describe how git stores and tracks
+content and move on to explain how each repository is organized,
+including the structure of meta-data. The main focus will be on the
+concepts related to the synchronization of repositories with important
+points summarized for the various topics.
+
+\subsection{Separation of Plumbing and Porcelain}
+% The Git Core}
+
+From the very beginning, there has been a great incentive to separate
+the version control system into two layers: the core, sometimes called
+the ``plumbing'', and the user interface, called the ``porcelain''.
+Much of this stems from the fact that in its early days, git
+development concentrated mainly on expanding the core part of the
+system. However, this separation also follows the tradition of UNIX,
+where there are a number of small and simple core tools that focus on
+doing just one thing, but which can be combined via scripting
+languages to accomplish complex tasks.
+
+A driving motivation behind the separation is the idea that the
+porcelain layer is simply a set of policies on how a user may interact
+with the VCS; a front-end that models a particular view on top of the
+content-based storage model. For example, how remote branches are
+mapped to local ones or how merging and handling of merge conflicts
+are done. As a result, different front-ends, apart from the one
+distributed with git itself, have emerged each focusing on different
+aspects of version control. To name a few, there is Cogito\cite{7}, focusing
+on user friendliness, and stgit\cite{8}\footnote{An abbreviation of ``stacked
+git''.}, a patch queue manager with the goal of making it easy to work
+with upstream branches.
+
+The separation has allowed the core to remain purely content-oriented
+and dedicated to the low-level details of tracking its data without
+compromising data integrity over features required in the porcelain
+interfaces. This has helped to keep the core clean with consistent, well-defined behaviors,
+leaving all the ``hacks'' to the porcelain layer. It has also been an
+important factor in keeping the VCS stable during the rapid
+development process.
+
+\subsubsection*{Summary}
+
+The clear separation and the resulting clean and transparent interface
+of the core are what allow one easily to plug in different storage
+or synchronization back-ends. A lot of tools exist for working at the
+git core level, which can be useful when implementing a new back-end.
+Only the core part of git is important for synchronization, so only
+the git core will be described in the following.
+
+\subsection{The Git Philosophy}
+
+%In the
+%following, the concept and motivation behind it will be examined in
+%greater depth, since it is often touted as fundamental to
+%understanding how git works.
+
+% A main design idea of git is
+The founding philosophy behind git is \emph{pure content tracking}.
+More specifically, git only cares about content, where content refers to
+data contained in files. However, where version control systems
+traditionally have been very file-oriented, focusing on the individual
+files and how they evolve independently of each other, git tries to take
+on a broader view and look beyond the individual files.
+
+First, some characteristics of pure content tracking will be
+introduced:
+
+\begin{description}
+
+\item[Content is atomic]
+%
+	Content must be considered in its entirety and tracked through
+	full copy snapshots. That is, if a file is edited and
+	committed, a full copy of the file's new content must be
+	recorded in the repository, even if only one byte in the file
+	was modified.
+
+\item[Content has no history or structure]
+%
+	This stems from the fact that two versions of a file can be
+	identical, if for example a change was applied in one version
+	and reverted in the following version. The two identical
+	versions must therefore by definition share the same content,
+	which means that the content itself cannot have any history.
+	Similarly for the absence of structure, two files situated in
+	different parts of a directory tree can contain the same
+	content. The content itself can, thus, neither have any
+	structure.
+
+% 00:56 < pasky> I believe that the claim that pure directory is not content is subjective and not universal
+
+\item[Implicit directory tracking]
+%
+	From git's point of view, directories only describe structure.
+	They do not themselves have any content and are therefore not
+	tracked explicitly. This means that it is not possible to
+	track an empty directory. However, when a file in a directory
+	is added to the list of tracked files, the following commit
+	will automatically add the nesting directory.
+
+\item[A snapshot is purely defined by its content]
+%
+	Objects for identical directory trees are always identical
+	regardless of whether they were derived by pulling the tree
+	objects from a git repository or by converting an archive, such as
+	a tarball, to a git repository.
+
+\end{description}
+
+% 00:59 < pasky> x0ample, git will gracefully handle...t0hat sentence sounds just strange in that context
+% 00:59 < pasky> first, it should rather read s0o, ...d0 second, it's not true :)
+% 01:00 < pasky> Not Even so... it just has nothing to do with the fact that the decision is made heuristically
+% 01:01 < fonseca> I admit that I know nothing about how git does the lowlevel merging, so it's probably better not to make any such claim. 
+% 01:01 < pasky> I don't see how pure content tracking allows me to track code snippet history in any way u0ren0tent tracking wouldn't
+
+As can be seen from the above, pure content tracking is in essence a
+model for version control built on the concept of snapshots. 
+The departure from the file-oriented approach is an acknowledgment of
+the fact that copying and moving content between files is much more
+common than moving whole files. Which means that in the end, it is
+much more powerful to track how content moves around in the tree.  As
+a result, git has no explicit rename tracking that is recorded at
+commit time, instead it allows renames to be detected when requested
+based on similarity. This dynamic rename detection is more expensive,
+but allows for more advanced heuristics to be developed and applied if
+deemed necessary.
+
+% The idea of focusing how content is copied or moved
+% between different files enables the exact history of a code snippet to
+% be derived, which in many ways is far superior to the file-limited
+% blame annotation normally used for such a task. Besides searching
+% across multiple files, one reason for its superiority is that this
+% feature, contrary to file annotation, will automatically search beyond
+% the last time lines in the code snippet of interest was touched by a
+% revision.
+
+\subsubsection*{Summary}
+
+While the topics in this section mostly relate to how git presents
+itself to the users, it also touches on important characteristics
+of git that facilitate distributing the content tracked by git in a
+peer-to-peer network. The content-based approach ensures that similar
+snapshots across different end points will be uniquely identifiable.
+How this is done is the topic of the following sections.
+
+% \subsection{Hashing a Global and Decentralized Model}
+\subsection{Global Information Tracking}
+
+In the git project's README file it is suggested that ``git'' is an
+acronym for \emph{global information tracker}. While \emph{information
+tracker} obviously refers to git being a version control system, the
+meaning of \emph{global} is much more than just decentralized when
+looking at the basic architecture of git. In his search for an open
+source VCS, Linus had considered monotone, a decentralized version
+control system based on secure hashes and cryptographic signatures,
+and decided to adopt secure hashes for git as the primary method for
+identifying various parts of the repository, such as revisions and
+directory trees. As a consequence, git is global not only in the sense
+that it allows projects to be version controlled in a decentralized
+manner, it also enables completely separate projects to be either
+contained in the same repository or merged together into one ``super''
+project.
+
+Secure hashes have been used in a variety of distributed systems. For
+example, the BitTorrent protocol employs secure hashes as means for
+peers to validate downloaded data and as a method of referring to a
+specific torrent\footnote{The term for the file (single file torrent)
+or the group of files (multi file torrent) the peer is downloading.}.
+This shows how secure hashes can be used to uniquely identify
+objects that are shared across end points and to verify the integrity
+of data being exchanged between end points.  Git combines both these
+properties by naming objects by the hash values of their content.
+Objects are then stored in the repository using the object names as
+part of the object file name. By organizing the repository based on
+the content instead of based on the files being tracked, the
+repository ends up being a database having a \emph{content addressable
+file system} as its backing store.
+
+% 01:04 < pasky> s/stronger hash algorithm&& yet (as of Oct 2006)/
+
+One caveat is the assumption that the secure hash function is able to
+provide unique object identifiers. This is vital to avoid accidental
+object collisions but also to ensure that a vicious person is not able
+to corrupt the object store with false data. As a result, the secure
+hash must be strong enough to avoid collisions and attacks. The hash
+function used by git is currently SHA1. Attacks have been found for
+SHA1, and it may therefore be necessary to move to a different hash
+function in the future.  However, given the nature of the proven
+attacks and how cryptographic hash functions are used by git, it has
+not yet been deemed serious enough to warrant a switch to a stronger
+hash function.
+
+Using secure hashes as the principal idea of the decentralized model
+leads to some interesting characteristics:
+
+\begin{description}
+
+\item[Fast comparison]
+%
+	If two objects share the same hash value, they are by
+	definition the same object, under the above assumption.
+
+\item[Fast access]
+%
+	Makes it possible to use a content addressable file system,
+	where objects can be accessed directly given the object name
+	without any lookup or indexing required.
+%	The catch is that it requires more storage space.  This can be
+%	a huge win compared to delta-oriented formats, such as RCS,
+%	where long delta chains may have to be rewound.
+
+\item[Universal naming scheme]
+%
+	Using a content-based naming scheme implies that object names
+	are stable across different end points. Being able to
+	universally identify an object is a prerequisite for
+	supporting a decentralized model.
+
+\item[Type and structuring transparency]
+%
+	The low-level storage layer does not need to differentiate
+	between what type of object it is storing or the object
+	hierarchy. Consequently, certain aspects of repository
+	synchronization is simplified.
+
+\end{description}
+
+The universal naming scheme allows a repository to host multiple
+distinct projects, enabling them to share objects, e.g. file objects
+containing the GPL license. The ability for projects to co-exist also
+makes it possible to clone a local repository by simply linking the
+resulting repository object store with that of the cloned repository.
+
+% in-project branches
+As can be seen, git is so fundamentally decentralized, that even
+within one single repository, each branch is totally independent and
+``self-hosting''. This has the consequence, that merging branches from
+projects which shares no development history is no different from
+merging branches belonging to the same project. The ability to perform
+such a merge and still maintain the complete revision history of each
+branch is a feature, which only few version control systems have.
+
+\subsubsection*{Summary}
+
+The decentralized model used by git means that branches hosted in the
+same repository is completely independent and self-hosting.  The use
+of secure hashes enable peers to verify the integrity of data
+downloaded on the wire. The simple addressing scheme ensures that
+objects are globally identifiable.
+ 
+\subsection{The Repository}
+
+The repository is where git stores all its information. It is usually
+situated in the top-level directory of the checked out working tree in
+a directory named \texttt{.git}. If no working tree is required, it
+may also exist as a bare repository where the convention is to use
+\texttt{.git} as the extension of the directory name. In the
+following, the organization of the repository will be described.
+
+% FIXME: Mention objects/pack??
+
+The two most important parts of the repository is the object store and
+the part devoted to tracking branches and tags. Branches and tags are
+located under the \texttt{refs} subdirectory, with branch heads living
+in the \texttt{refs/heads} directory and tags in \texttt{refs/tags}.
+They are examined in Section \ref{sec:branch-tag} below. The object
+store can be found under the subdirectory named \texttt{objects} and
+is described in more detail in Section \ref{sec:object-store}.
+
+Git supports a variety of protocols for synchronizing repositories,
+each of which must be configured to map remote branches to local
+branches. Two methods for configuring this mapping exist, the original
+one contained in \texttt{branches} and the more flexible one contained
+in \texttt{remotes}. The original method is the simpler one and
+configure only one branch per entry. However, since repositories can
+contain multiple branches the more flexible concept of \emph{remotes}
+was added to allow a pull to update multiple local branches at once,
+reducing the overhead of a series of pulls. The topic of repository
+synchronization is further handled in Section \ref{sec:repo-sync}.
+
+The repository also contains a \texttt{hooks} directory where it is
+possible to define scripts scheduled to run when certain events occur.
+As an example, there is an \emph{update} hook which can be used to
+block a repository update or send a notification message, whenever new
+changes are pushed into the repository. Some of the hooks take
+arguments, such as revision IDs, and can use their exit code to
+signal, whether a specific operation should proceed or be canceled.
+Included in git is a collection of sample hook scripts, which are all
+installed, but disabled by default. They can be enabled by simply
+making them executable.
+
+\begin{comment}
+
+\subsubsection{The Index File}
+
+Staging area during merges
+
+A cache of file system (fstat()) info
+
+	-> a fast method for checking for modifications
+
+Allows certain operations to be performed directly in the index (file)
+instead of the working tree.
+
+This was solved by introducing a directory cache
+in the form of an index file listing all files tracked by the VCS
+together with file system status information, that allows to quickly
+determine whether a file has changed on disk.
+
+\end{comment}
+
+\subsubsection*{Summary}
+
+Repositories have a well-defined layout and are completely separated
+and self-contained. They can exist as bare repositories. This is
+suitable for a storage back-end which does not care about working
+trees. There already exists various data formats for specifying
+repository related information which can be of help for new storage
+back-ends.
+
+\subsection{The Object Store} \label{sec:object-store}
+
+The bulk of the repository is the object store where all revision
+snapshots are stored in the form of objects having a hierarchical
+structure. By default, the object store lives in a subdirectory in the
+repository, however, via a mechanism called \emph{alternatives},
+objects may be distributed among numerous directories creating an
+overlay of object stores. This can be used to speed up cloning of
+subprojects with intersecting object stores, such as the repositories
+published by the Linux kernel subsystem maintainers.
+
+The object store uses a content addressable file system structure,
+where each object is stored in a separate file containing all
+information regarding the object, and where all objects are organized
+based on their hash value in hexadecimal form. To improve file system
+performance when the object store accumulates many objects, object
+files are distributed over 256 subdirectories based on the first two
+bytes of the object name. For example, the object having the hash
+\texttt{27165a1ad2617898b38d0fc16e530c5b12fa92} will be stored
+under the subdirectory \texttt{27} as
+\texttt{27/165a1ad2617898b38d0fc16e530c5b12fa92}.
+
+\begin{figure}
+\begin{center}
+
+	\newlength{\ObjWidth}
+	\settowidth{\ObjWidth}{\scriptsize{\bf Commit C}}
+	\newcommand{\Obj}[2]{[name=#1]\psframebox[cornersize=absolute,linearc=3pt]{\makebox[\ObjWidth]{\scriptsize{\bf #2}}}}
+	\newcommand{\ObjLine}[2]{\ncline{#1}{#2}\naput{\scriptsize{\emph{}}}}
+
+	\begin{psmatrix}[colsep=0.5,rowsep=1,mnode=r]
+			 	 & \Obj{A}{Tag A} \\
+		\TextNode{Z}{...}	& \Obj{B}{Commit A} &                   & \Obj{D}{Commit B} &                  & \Obj{F}{Commit C} & & \TextNode{V}{...} \\
+		         	 & \Obj{C}{Tree A}   & \Obj{K}{Blob A1}  & \Obj{E}{Tree B}   & \Obj{H}{Blob B1} & \Obj{G}{Tree C} & \Obj{M}{Blob C1}   \\ 
+		         	 &                   & \Obj{L}{Blob A2}  &                   & \Obj{I}{Blob B2} &  \Obj{O}{Tree C3}               & \Obj{N}{Blob C2} \\ 
+		         	 &                   &                   &                   & \Obj{J}{Blob B3} &                     & \Obj{P}{Blob C31}
+		% Node connections
+		\psset{nodesep=1pt,arrows=->}
+		\ObjLine{A}{B}{}
+		\ObjLine{B}{C}{}
+		\ObjLine{D}{E}{}
+		\ObjLine{F}{G}{}
+
+		\ObjLine{V}{F}{}
+		\ObjLine{F}{D}{}
+		\ObjLine{D}{B}{}
+		\ObjLine{B}{Z}{}
+
+		\ObjLine{C}{X}{}
+		\ObjLine{G}{Y}{}
+
+		\ObjLine{C}{K}{}
+		\ObjLine{C}{L}{}
+
+		\ObjLine{E}{H}{}
+		\ObjLine{E}{I}{}
+		\ObjLine{E}{J}{}
+
+		\ObjLine{G}{M}{}
+		\ObjLine{G}{N}{}
+		\ObjLine{G}{O}{}
+		\ObjLine{O}{P}{}
+	\end{psmatrix}
+
+	\caption{The git object hierarchy.}
+
+	\label{fig:object-hierarchy}
+
+\end{center}
+\end{figure}
+
+% It uses a self verifying
+% on-disk format to ensure data integrity and
+% 
+% Content - hierarchy - state (history) - trust
+
+There exist four basic types of objects. Following, they are
+introduced bottom-up with respect to the object hierarchy depicted in
+Figure \ref{fig:object-hierarchy}:
+
+\begin{description}
+
+\item[Blob]
+%
+	Blob objects are, as the name suggests, a pure storage object,
+	that contains the data associated with a particular file
+	version. Blob objects themselves do not refer to other
+	objects.
+
+\item[Tree]
+%
+	A tree object holds information about a single directory in
+	the broader directory tree of a snapshot. Files in the directory are
+	referenced as blob objects and nested directories are
+	referenced as other tree objects. Apart from containing
+	hierarchic information about the directory tree, it also
+	records information such as permission flags.
+
+\item[Commit]
+%
+	Each revision will create a commit object that records the
+	state of the working tree by referencing a tree object.
+	Optionally, the commit object may also record one or more
+	parent commit objects, depending on whether the commit is a
+	merge or not. The initial revision in a project will have no
+	parents. The same applies for pristine branches. Additionally,
+	the object also records the identity of the author and
+	committer along with a time stamp for both, as a mean to
+	attribute who is responsible for the commit, and free form
+	text to hold the commit message.
+
+\item[Tag]
+%
+	Tag objects may point to any type of object. It holds
+	information about the tag name, and the identity of the tagger
+	along with a time stamp. Finally, it may also contain free-form
+	text that can embed a PGP signature of the tag information.
+
+\end{description}
+
+Similar for all objects is, that they each contain an object header
+holding meta-information, such as the object type. Whereas the object
+body may use a binary format to represent its data, the object header
+uses a line-oriented ASCII encoded name-value format.
+
+% FIXME: Zlib reference??
+
+To reduce the size of objects they are compressed using zlib.  The
+zlib library uses dictionary based data compression and as a result
+will perform poorly on certain types of objects. For example, tree
+objects, that by definition contain many random SHA1 strings, may not
+compress very well, and the same holds for blob objects containing
+binary data, which themselves may already be compressed using zlib or
+another compression format. The zlib library will ensure that
+compression will never increase the size of the data compared to the
+original, by simply falling back to not apply any compression.
+
+\subsubsection{Self-verifying On-disk Format}
+
+As already established, securing data integrity is among the most
+notable goals of a VCS. In a decentralized VCS this is even more
+important since the integrity of data may be challenged not only by
+hard disk failures or faults in the operating system, but also by
+rogue end points. Having a self-verifying on-disk
+format is therefore desirable, since it allows incoming data to be
+verified and the repository to be regularly checked against
+corruption. This increases the chance, that corruption is caught as
+early as possible and helps to avoid that it spreads to other end
+points and disrupts the system.
+
+One consequence imposed by the desire for a self-verifying on-disk
+format is stricter object relations. For example, a commit object not
+only encodes the state of the commit and what the associated directory
+tree looked like, but also the history that led up to that state. In
+other words, the revision history becomes immutable and append-only
+since this strict inter-object relationship ensures that it is
+impossible to tamper with the revision history without it being
+immediately obvious.
+
+Nevertheless, there may exist valid cases where the need for editing a
+previous revision arises, e.g. amending of a commit message. In these
+cases all revisions following the amended revision must also be
+edited, an operation called \emph{rebasing}, in order to reestablish
+the inter-object relationship. Rebasing can also be used to update the
+branch point of a development branch so that it fast-forwards on top
+of another branch; a method often used by downstream developers to
+synchronize with the upstream branch they are tracking. Caution must
+however be taken when rewriting revisions in published branches, since
+they will no longer fast-forwarding when they are pulled.
+
+Rebasing may leave behind unused objects in the repository database.
+Again, the self verifying on-disk format provides a solution,
+however, in order to prune such objects the complete database must be
+traversed to identify the unused objects. This method can also be used
+to resurrect unreferenced revisions that has been lost by accident,
+again ensuring data integrity in the repository database.
+
+An instance where the importance of the self verifying on-disk format
+is further underlined is with tags. The inter-object relationships
+ensures that by tagging a specific revision object, the whole
+development history leading up to the revision is also tagged. By
+combining this with cryptographically signed tags, it is possible to
+further introduce a human derived degree of trust that a
+specific revision has been identified as the only valid.
+
+\subsubsection{Grafting Revision Graphs}
+\label{sec:grafting}
+
+In some situations, the strict inter-dependencies of revisions become
+a restriction rather than an appreciative feature that helps to ensure
+data integrity. The problem mainly arises, when an project that has
+long been using a version control system decides to switch and start
+using the git version control system. Although tools exists for
+importing project history from the most popular version control
+systems, it may in some circumstances be undesirable to require users
+to download a lot of historic data in order to just try out the most
+recent version. Additionally, the project may later decide to
+convert its old history and make it available as a git repository, in
+which case all of the new history would have to be rebased on top of
+the old history. This would require the repository to be cloned again
+since all branch heads would have been updated.
+
+To solve both of these issues, git allows revision graphs to be
+\emph{grafted} on top of each other. Grafting works by simply allowing
+``fake'' parent revisions to be inserted into the revision graph so
+that it appears as if the revisions logically precede another
+revision. The result is that projects can start from scratch without
+worrying about the old history and then later convert it and offer it
+as an optional extension to the main repository.
+
+Obviously, this has the potential to undermine the self-verifying
+nature of the object store by allowing any revision to precede another
+with no regards to whether it actually is a real parent of the
+revision. For this reason, grafting requires the user to actively
+create the graft file and insert the grafted revisions. In other
+words, a repository that the user decides to pull some changes from
+cannot insert fake revisions information and corrupt a repository.
+
+\subsubsection*{Summary}
+
+The structure of the object store allows the integrity of the data in
+it to be verified regarding both the individual objects using their
+SHA1 name and the object hierarchy of which they are part. As for all
+storage back-end, they should always ensure that data is valid before
+making it part of the repository structure.
+
+Rebasing of certain branches might leave unused objects in the object
+store so it may be necessary to periodically prune it to reduce
+disk-space utilization. The space needed for storing objects can
+further be reduced by using the alternatives mechanism to cascade
+object stores of repositories that have intersecting objects. For such
+repositories, sharing object stores can also reduce the number of
+objects that needs to be downloaded. 
+
+% Similar to when the alternatives method is used for local repositories
+% this raises the issue of ensuring that data is written to disk in a
+% safe manner. This is even more important
+%
+% All download into the same repository
+
+\subsection{Branches and Tags}
+\label{sec:branch-tag}
+
+Since all information related to branch revisions and tags is
+maintained as objects in the object store, the branches and tags end
+up being simply symbolic references to objects. They map a name to the
+SHA1 of an object in the object store. Originally the references has
+been stored in 41-byte files, 40-bytes for the SHA1 value followed by
+a newline, however, the use of such small files doesn't scale well
+when the number of branches and tags grows. Consequently, git is
+currently moving to using a single flat-file containing all symbolic
+references.
+
+Git already defines a notation for expressing the list of references
+in a repository, which is used when synchronizing repositories.  The
+\texttt{git-ls-remote} program can be used for listing references in a
+repository, local as well as remote. It has the following output:
+
+\begin{verbatim}
+0248f303a64c0db45b78cf987db5bc1ddf00d15b	HEAD
+0248f303a64c0db45b78cf987db5bc1ddf00d15b	refs/heads/master
+0248f303a64c0db45b78cf987db5bc1ddf00d15b	refs/heads/origin
+7113a59591aab60f979c6993bffa4cdd66236fdf	refs/tags/initial
+8dec84bb6b5eb7eb8831582dfd7ebbadb0403474	refs/tags/initial^{}
+c732f546d2924665a197fede48721870f96f53d7	refs/tags/ref-0.1
+bd562ca1ef05b91e6dbcddf3ace0c897ef76567e	refs/tags/ref-0.1^{}
+\end{verbatim}
+
+Each line lists one reference by its hexadecimal encoded SHA1 and
+name, both separated by a tab. The name is the path under the git
+repository and the special \texttt{HEAD} reference refers to the
+trunk. For each tag, the object it points to is also listed using a
+special object ``dereference'' notation where \texttt{\^}\texttt{\{\}}
+is  appended to the tag name.
+
+While the append-only semantics of the object store reduces the
+changes of race conditions when adding new objects, ensuring atomic
+updates of the symbolic references is more critical. Before a symbolic
+reference can be updated it needs to be locked, which is done by first
+creating a lock file associated with the branch head. If this
+succeeds, the lock file is then renamed to the branch head file.
+Although switching to a single flat-file for storing references
+results in coarser lock granularity, lock contention is only an issue
+for shared repositories and will likely not become a problem.
+
+Contrary to the object store, there is no way to verify the symbolic
+reference in any way. Usually, they are updated either when committing
+locally or when pulling changes from a remote repository. In
+both cases, the source of the new references is assumed to be trusted.
+
+\subsubsection*{Summary}
+
+Branches and tags are simply symbolic references mapping object SHA1
+to a name and can be expressed using a dense format. An open question
+is how to ensure the validity of the reference lists when
+synchronizing it between end points, since git does not itself provide
+a method for this. In some repositories many tags and branches can
+exist so the reference list may become very long.
+
+\subsection{Delta-based Storage and Packing}
+
+% Concern
+
+The storage model described in Section \ref{sec:object-store} will
+maintain a complete copy of each object in order to allow the direct
+addressing. If only a byte is changed in a file, a full copy of the
+new blob object will enter the object store. Even though each objects
+is compressed this can lead to repositories quickly requiring a lot of
+backing store. Initially, the argument was, that disk space is cheap
+and that this would not pose a problem, at least not right away.
+
+% Stats about object sizes in the Linux kernel?
+
+Several issues with this very simple storage model gradually became
+clear. First, many of the objects, that are created, are small and as
+a result leads to a large amount of storage overhead when they are
+stored in block-based file systems. Second, when working with
+many objects, they all have to be loaded into memory which can require
+a considerable amount of memory and may exhibit poor caching behavior
+because of bad access patterns. Finally, git initially used rsync to
+synchronize repositories across different end points, making cloning
+of big repositories painful by requiring a lot of data to be
+transfered. It was evident that there was a need for a more suitable
+storage model that addressed these issues.
+
+\subsubsection{Introducing Deltas}
+
+% Stats about ``locality''
+
+The solution employed by many existing version control systems is to
+exploit the locality of the file data being tracked. Often two
+successive versions of a file will share most of its content and only
+a small difference will remain. By representing the difference in the
+form of a delta object, it is possible to derive one from the other by
+simply applying the delta on the version that is available. This can
+be repeated endlessly so that only one complete version needs to be
+stored, while the remaining versions are all represented as a chain
+of deltas.
+
+Traditionally, a weave format such as RCS or SCCS has been used for
+encoding the delta compression of a single file. They make the
+most recent version of the file readily available and keeps all other
+versions as deltas. This is often a good heuristic, since the most
+recent versions are usually the ones being accessed most frequently.
+However, if many versions exist, the delta chain can become very deep,
+making access to an old version very expensive.
+
+% (affects how many steps there
+% must be taken in order to assemble the compressed object.
+
+\subsubsection{Packing Heuristics}
+
+Since git is not tied to the file based model of other version control
+systems, it has been able to pursue other compression heuristics and
+consequently also alleviate the problem with deep delta-chains. The
+problem of coming up with a good heuristic, that works for many
+different use cases, is a subject that has been discussed continuously
+in the community. Compression should be able to efficiently handle
+both binary files, files of very different sizes, randomly created
+file names as well as logically structured names, and try to take
+locality of data into account. In the following some of the heuristics
+regarding packing will be introduced.
+
+The general idea is to first sort objects by type, size and optionally
+where they reside in the directory tree. Sorting by type ensures that
+objects with similar characteristics will be compressed against each
+other. Using size as a sorting heuristics tries to take into
+account that files of similar size are more likely to have a lot in
+common. By optionally sorting blob objects with respect to their
+corresponding file path, locality is prioritized which increases the
+chances that deltas will be smaller. Coupled with the size sorting,
+this also considers that files often increase in size over a set of
+versions and thus further improves locality with respect to time.
+
+% Default values?
+
+One approach to comply with the many different use cases has been to
+make key aspects of the compression algorithm configurable, such as
+the window of objects being compressed against and the depth of the
+delta chain. By limiting the depth of the delta chain certain
+guarantees regarding the cost of accessing an object can be made.
+Similar to how video format often encode using several base frames
+followed by delta frames, the delta chain can be ``restarted'' by
+simply inserting a complete object once the maximum depth has been
+reached. Using a window to limit which objects to delta against
+further enables the compression algorithm to only use delta
+compression when it saves space, because objects will only be compared
+against ``local'' objects with respect to the sorting order.
+
+Another thing to consider when packing is the properties of the
+different object types. Blob objects provide the best basis for delta
+compression, and since they are the bulk of the object store,
+compression heuristics specifically oriented towards blob objects has
+a significant impact on the packing. The commit and tag objects both
+contain random free-form text, and therefore rarely share data between
+successors apart from author information. Although tree objects often
+share data across different versions they are by definition more
+``fragile'', since a change in a deeply nested directory will cause
+all parent tree objects to be rewritten, whereby the attempt to delta
+compress tree objects is over-shadowed by the volume and rate at which
+they are created.
+
+Finally, there is the problem of coming up with a good heuristic of
+when and what to pack. Where locally everything can just be packed
+into one monolithic pack file, repositories used as distribution
+points must also consider using incremental packing to minimize the
+number of packs and objects that needs to be fetched. To date, this
+still remains an open problem.
+
+\subsubsection{Using Pack Files}
+
+Using the delta-based compression git is able to pack the object store
+into a dense representation of its objects. The pack files can then be
+used both for efficiently transferring objects between repositories and
+for local storage. This eliminates the problem with many small files,
+and to some extend provides better caching when objects are in memory
+because pack files can be memory mapped in their entirety.
+
+Pack files are, however, expensive to generate, since many objects
+potentially must be examined. This downside affects the performance of
+the git server daemon used by many projects for providing access to
+repositories. The solution is to reuse portions of existing pack files
+when repacking a repository, so that only new objects need to be
+examined while already compressed objects can be kept untouched. Since
+this incremental form of compression does not take the whole data set
+into consideration, it does not lead the optimal packing. This means
+it may still be necessary to periodically fully repack a repository
+without using existing pack files.
+
+Currently there is a limit on the size of pack files both in terms of
+how packs are loaded by the git core but also in terms of the data
+format used, however it can be expected that pack files in the future
+can be arbitrarily big. As a consequence, it is not always viable to
+load an object pack or fetch it from a remote end point to see if it
+contains objects that are of use. Additionally, for big packs it can
+be expensive to locate an object in a pack. To solve this, a pack can
+be accompanied by an index file which lists the content of a pack
+together with offsets so that it is possible to both see the content
+of a pack and where in the pack objects are located.
+
+% For this reason git uses explicit packing, meaning that
+% packing is something that must be performed explicitly by the user.
+% : feature or bug?
+
+% As a result pack
+% files are not ``stable'' in the sense that different configurations
+% may lead to different pack files that all represent the same
+% collection of objects. Flexibility has
+
+Using packs to some extent affects the idea of the content addressable
+file system. Since objects may now be represented as a series of
+deltas, it is no longer possible to fast and directly access them.
+While this is a regression in terms of speed for this particular case,
+packs provide so many other benefits that they end up
+improving the overall performance considerably.
+
+
+\subsubsection*{Summary}
+
+Using object packing it is possible to densely represent objects in
+the object store. This is usable both for local storage and for
+transferring data over the wire when synchronizing repositories. Index
+files provide a way to summarize the content of a pack file making it
+possible to identify which pack files have objects that are
+interesting. Deltas from old packs can be reused when creating new
+packs to reduce the cost of packing objects.
+
+An open question is how to best pack the object store. Different
+heuristics exists and the packing format is designed so that it is
+open for new heuristics to be used. As a consequence, it is not
+possible to rely on packs being the same across different instances of
+a repository.
+
+\subsection{Repository Synchronization}
+\label{sec:repo-sync}
+
+There exist a variety of methods or protocols for synchronizing
+repositories, each providing different options regarding what
+requirements are imposed on the end points involved in the
+synchronization. The many choices have originated to provide better
+support for the many different work flows in which git is being used,
+for example being able to push or pull changes across a company firewall.
+Similar for all existing transport protocols are that they are
+strictly client-server.
+
+The protocols can be divided into two subcategories: \emph{static} and
+\emph{dynamic}, depending on whether they require a
+specialized server:
+
+\begin{description}
+
+\item[Static protocols]
+%
+	The group of static protocols are sometimes referred to as
+	\emph{dumb} protocols, because they do not require anything
+	from the server other than being able to serve static data
+	in the form of the repository directory tree. It includes
+	protocols, such as HTTP, FTP, rsync, and to some extent local
+	file copying, although local cloning can also use a dynamic
+	protocol.
+
+	Rsync and local file copying are discouraged, since they do
+	not ensure that the resulting repository is valid because of
+	the sequential order in which they copy the files. For
+	example, a branch head can point to a non existing (as in
+	copied) commit, if the repository being synchronized was
+	updated in the process.  Consequently, neither rsync nor
+	simple copying are safe methods to synchronize or backup a git
+	repository.
+
+	Compared to rsync, the HTTP and FTP protocols are a little
+	smarter, since they will both download and verify that the
+	downloaded data is valid. To optimize examination of a remote
+	repository, the HTTP and FTP protocols rely on a set of
+	``meta'' files being present. These files, which can be
+	generated automatically by calling the
+	\texttt{git-update-server-info} program from a hook, lists
+	information about branch and tag references as well as pack
+	files available in the repository.
+
+	The only static protocol, that supports pushing, is HTTP,
+	which can be configured to use WebDAV to provide the necessary
+	authentication.
+
+\item[Dynamic protocols]
+%
+	The dynamic protocols, known as \emph{smart} protocols,
+	are recognizable by the fact that they all use pack files to
+	transfer updates, whereby they minimize bandwidth usage. Among
+	the dynamic protocols is the native git protocol, which has
+	its own dedicated daemon and provides read-only access to
+	repositories. If write-access is required, options exist for
+	using SSH to authenticate users and then provide access to
+	repositories. If users are not allowed to log into the system
+	in question a special \texttt{git-shell} program has been
+	created which can be set as the default shell for the user and
+	thereby restrict access to only those involving git
+	activities.
+
+\end{description}
+
+As can be seen from the above, git does not itself implement any
+authentication methods regarding write-access, instead it relies
+completely on those provided by third party systems, mainly SSH and
+WebDAV. The primary argument is that authentication is hard to get
+right and by using existing authentication systems, existing
+configurations can also be used, for example SSH accounts.
+
+In order to ensure that the resulting repository is valid, the
+following steps are taken when synchronizing a repository: first, the
+branch heads in the two repositories are checked to see if any
+synchronization is required, then for each branch that contain
+updates, the relevant objects are synchronized between the two object
+stores, and finally upon successful completion, the branch heads are
+updated atomically to reflect the new changes. This operation sequence
+guarantees that the synchronization is idempotent and that it is safe
+to cancel the synchronization in any of the steps. The only result
+will be that unreferenced objects can exist in the object store,
+objects that can be later pruned if deemed necessary.
+
+% As a special dynamic protocol there also exists
+% Different protocol: ssh, HTTP, ``native'' git. git cvs server
+
+\subsubsection*{Summary}
+
+Different protocols exists for synchronizing repositories, some of
+which are better than others at capitalizing on the use of object
+packs when transferring changes. They are all client-server based and
+have each solved different issues related to synchronizations, some of
+which may also be relevant to new networked storage back-ends.
